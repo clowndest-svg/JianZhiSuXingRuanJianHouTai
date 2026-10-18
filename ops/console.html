@@ -233,15 +233,18 @@ $("refresh").onclick = () => refreshAll();
 
 async function refreshAll() {
   try {
-    const [ov, h, fb, rp] = await Promise.all([api("/overview"), api("/health"),
-      api("/feedback?limit=5"), api("/reports?limit=5")]);
+    const [ov, h, fb, rp, media] = await Promise.all([api("/overview"), api("/health"),
+      api("/feedback?limit=5"), api("/reports?limit=5"), api("/media/orphans")]);
     $("ovtime").textContent = "运维读数时间 " + (h.ops_time || "");
     const c = ov.counts || {};
     $("ovcards").innerHTML = [
       card("用户", c.users), card("帖子", c.posts), card("评论", c.comments),
       card("点赞", c.post_likes), card("关注", c.follows), card("私信", c.messages),
       card("会话", c.conversations), card("反馈", c.feedback), card("举报", c.content_reports),
-      card("被封号", ov.pending.banned, ov.pending.banned ? "bad" : "")
+      card("被封号", ov.pending.banned, ov.pending.banned ? "bad" : ""),
+      card("孤儿文件", media.orphans === null ? "无读数" : media.orphans,
+           media.orphans ? "mid" : ""),
+      card("孤儿占用", media.orphan_bytes === null ? "无读数" : (Math.round(media.orphan_bytes / 1024) + " KB"), "")
     ].join("");
     $("pending").innerHTML = "<ul>"
       + "<li>待处理反馈：" + esc(ov.pending.feedback_new) + " 条</li>"
@@ -313,7 +316,9 @@ async function loadUsers() {
             : '<button class="danger" data-act="ban" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">封号</button>')
         + '<button data-act="revoke" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">撤销会话</button>'
         + '<button data-act="reset" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">重置口令</button>'
+        + '<button data-act="rename" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">改昵称</button>'
         + '<button data-act="export" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">导出</button>'
+        + '<button data-act="dm" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">导出会话</button>'
         + '<button class="danger" data-act="delete" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">注销</button>'
         + "</div></td></tr>").join("") + "</table>";
   } catch (e) { toast("读用户失败：" + e.message); }
@@ -348,6 +353,23 @@ $("utable").addEventListener("click", async (ev) => {
       if (!confirmEcho("重置 " + name + " 的口令（同时撤销全部会话）", name)) return;
       const d = await api("/users/" + id + "/reset-password", { method: "POST", body: JSON.stringify({ expect_username: name }) });
       toast("一次性口令：" + d.one_time_password + " ｜只显示这一次，关掉页面就没了 ｜已撤销 " + d.revoked_sessions + " 个会话", "keep");
+    } else if (act === "rename") {
+      if (!confirmEcho("改 " + name + " 的昵称", name)) return;
+      const nick = window.prompt("新昵称（最多 20 字）：", "");
+      if (!nick || !nick.trim()) { toast("昵称不能为空"); return; }
+      const d = await api("/users/" + id + "/nickname", {
+        method: "POST", body: JSON.stringify({ expect_username: name, nickname: nick.trim() }) });
+      toast("已改为：" + d.nickname);
+    } else if (act === "dm") {
+      const peer = window.prompt("导出与谁的会话？填对方的用户 id（数字）：", "");
+      if (!peer || !/^\d+$/.test(peer.trim())) { toast("要填数字 id"); return; }
+      const d = await api("/users/" + id + "/messages/export?with_user=" + Number(peer));
+      const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "qingsu-dm-" + id + "-" + peer + ".json";
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("已导出 " + d.messages.length + " 条消息（已撤回的正文为空）");
+      return;
     } else if (act === "export") {
       const d = await api("/users/" + id + "/export");
       const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });

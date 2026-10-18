@@ -347,6 +347,49 @@ class OpsApi(unittest.TestCase):
         self.assertEqual(self.sql("SELECT COUNT(*) c FROM weight_logs")[0]["c"], other_before,
                          "整张表被清空式的删除")
 
+    def test_delete_account_survives_other_peoples_interactions_on_its_posts(self):
+        """别人点赞/评论/收藏了要删的账号的帖子时，只按 user_id 删会撞外键整笔回滚。
+        线上实测踩到：第一条删号 500、账号还在。这里钉住‘依赖行先清、别人的别处数据不动’。"""
+        post = self.app.post("/api/community/posts", headers=self.auth(),
+                             json={"text": "要删的账号发的帖子", "images": [],
+                                   "request_id": "del-dep-1"}).json()["post"]
+        pid = int(post["id"])
+        other_h = {"Authorization": "Bearer " + self.other["token"]}
+        self.assertEqual(self.app.post("/api/community/posts/%d/like" % pid,
+                                       headers=other_h, json={"on": True}).status_code, 200)
+        self.assertEqual(self.app.post("/api/community/posts/%d/favorite" % pid,
+                                       headers=other_h, json={"on": True}).status_code, 200)
+        self.assertEqual(self.app.post("/api/community/posts/%d/comments" % pid, headers=other_h,
+                                       json={"text": "别人的评论", "request_id": "del-dep-c1"}).status_code, 200)
+        # 另一个账号自己发一帖，删号后必须原封不动
+        keep = self.app.post("/api/community/posts", headers=other_h,
+                             json={"text": "不该被牵连的帖子", "images": [],
+                                   "request_id": "del-dep-2"}).json()["post"]
+        plan = self.ops.post("/api/users/%d/delete-account" % self.signup["id"],
+                             json={"expect_username": "opsowner", "plan_only": True},
+                             headers=self.bearer).json()
+        dep = {x["table"]: x["rows"] for x in plan.get("dependents", [])}
+        self.assertEqual(dep.get("post_likes"), 1, "依赖清单漏了别人的点赞：%s" % dep)
+        self.assertEqual(dep.get("post_favorites"), 1, "依赖清单漏了别人的收藏：%s" % dep)
+        self.assertEqual(dep.get("comments"), 1, "依赖清单漏了别人的评论：%s" % dep)
+        # 页面上的"待删行数"必须把依赖行算进去，否则确认键永远对不上
+        self.assertEqual(plan["rows"], sum(x["rows"] for x in plan["plan"]) + sum(dep.values()))
+        good = self.ops.post("/api/users/%d/delete-account" % self.signup["id"],
+                             json={"expect_username": "opsowner", "confirm_rows": plan["rows"]},
+                             headers=self.bearer)
+        self.assertEqual(good.status_code, 200, good.text)
+        self.assertEqual(self.sql("SELECT id FROM users WHERE id=?", (self.signup["id"],)), [])
+        self.assertEqual(self.sql("PRAGMA foreign_key_check"), [], "删完留了指向已删帖子的行")
+        self.assertEqual(self.sql("SELECT id FROM posts WHERE id=?", (pid,)), [], "要删账号的帖子还在")
+        self.assertEqual(len(self.sql("SELECT id FROM posts WHERE id=?", (int(keep["id"]),))), 1,
+                         "别人自己的帖子被牵连删掉了")
+        self.assertEqual(self.sql("SELECT COUNT(*) c FROM post_likes WHERE post_id=?",
+                                  (pid,))[0]["c"], 0, "别人对已删帖子的点赞没清")
+        self.assertEqual(self.sql("SELECT COUNT(*) c FROM post_favorites WHERE post_id=?",
+                                  (pid,))[0]["c"], 0, "别人对已删帖子的收藏没清")
+        self.assertEqual(self.sql("SELECT COUNT(*) c FROM comments WHERE post_id=?",
+                                  (pid,))[0]["c"], 0, "别人对已删帖子的评论没清")
+
     def test_delete_plan_and_audit_never_carry_credentials(self):
         self.ops.post("/api/users/%d/ban" % self.signup["id"],
                       json={"expect_username": "opsowner", "reason": "测试"}, headers=self.bearer)
@@ -365,6 +408,87 @@ class OpsApi(unittest.TestCase):
             self.assertNotIn(word, text, "导出里出现了敏感列 " + word)
         self.assertNotIn("opsother", text, "别人的账号被带进单用户导出")
         self.assertEqual(self.ops.get("/api/users/999999/export", headers=self.bearer).status_code, 404)
+
+    def test_rename_user_needs_the_exact_username_and_leaves_an_audit_row(self):
+        before = self.sql("SELECT nickname FROM users WHERE id=?", (self.signup["id"],))[0]["nickname"]
+        wrong = self.ops.post("/api/users/%d/nickname" % self.signup["id"],
+                              json={"expect_username": "写错的人", "nickname": "新昵称"},
+                              headers=self.bearer)
+        self.assertEqual(wrong.status_code, 409, "用户名对不上却改了昵称")
+        self.assertEqual(self.sql("SELECT nickname FROM users WHERE id=?",
+                                  (self.signup["id"],))[0]["nickname"], before,
+                         "被拒的动作还是改了库")
+        empty = self.ops.post("/api/users/%d/nickname" % self.signup["id"],
+                              json={"expect_username": "opsowner", "nickname": "   "},
+                              headers=self.bearer)
+        self.assertEqual(empty.status_code, 422, "空昵称也能提交")
+        long_name = "一二三四五六七八九十一二三四五六七八九十多出来的字"
+        ok = self.ops.post("/api/users/%d/nickname" % self.signup["id"],
+                           json={"expect_username": "opsowner", "nickname": long_name},
+                           headers=self.bearer)
+        self.assertEqual(ok.status_code, 200, ok.text)
+        saved = self.sql("SELECT nickname FROM users WHERE id=?", (self.signup["id"],))[0]["nickname"]
+        self.assertEqual(saved, long_name[:20], "昵称没有被截到 20 字")
+        self.assertEqual(ok.json()["nickname"], saved, "回执与落库不一致")
+        row = self.audits("rename_user")[-1]
+        self.assertEqual(row["before_json"]["nickname"], before)
+        self.assertEqual(row["after_json"]["nickname"], saved)
+        # 另一个账号的昵称没被牵连
+        self.assertNotEqual(self.sql("SELECT nickname FROM users WHERE id=?",
+                                     (self.other["id"],))[0]["nickname"], saved)
+
+    def test_orphan_media_counts_are_real_and_no_filenames_leak(self):
+        up = self.root / "UPLOAD"
+        (up / "keep-me.jpg").write_bytes(b"x" * 10)
+        (up / "orphan-one.png").write_bytes(b"y" * 33)
+        self.sql("INSERT INTO posts(user_id,body,images,created_at) VALUES (?,?,?,?)",
+                 (self.signup["id"], "带图帖子", json.dumps(["/uploads/keep-me.jpg"]),
+                  "2026-10-19 00:00:00"))
+        r = self.ops.get("/api/media/orphans", headers=self.bearer)
+        self.assertEqual(r.status_code, 200, r.text)
+        out = r.json()
+        self.assertEqual(out["files"], 2, "上传目录里的文件数不对")
+        self.assertEqual(out["referenced"], 1, "被帖子引用的文件没算进 referenced")
+        self.assertEqual(out["orphans"], 1, "孤儿数不对")
+        self.assertEqual(out["orphan_bytes"], 33, "孤儿体积算错了")
+        text = r.text
+        for name in ("keep-me.jpg", "orphan-one.png"):
+            self.assertNotIn(name, text, "文件名属于敏感列，不该回给前端：" + name)
+        self.assertIn("只报告", out["note"], "没有说明这是只读报告，运营会以为点一下就删")
+
+    def test_dm_export_covers_only_that_pair_and_blanks_recalled_bodies(self):
+        third = self.app.post("/api/register", json=dict(self.app_body, username="opsthird")).json()
+        a, b, c = self.signup["id"], self.other["id"], third["id"]
+        key = "%d:%d" % (min(a, b), max(a, b))
+        other_key = "%d:%d" % (min(a, c), max(a, c))
+        self.sql("INSERT INTO messages(conv_key,from_id,to_id,body,created_at,recalled_at)"
+                 " VALUES (?,?,?,?,?,NULL)", (key, a, b, "第一句正常话", "2026-10-19 00:00:01"))
+        self.sql("INSERT INTO messages(conv_key,from_id,to_id,body,created_at,recalled_at)"
+                 " VALUES (?,?,?,?,?,?)", (key, b, a, "这句要撤回", "2026-10-19 00:00:02",
+                                           "2026-10-19 00:00:03"))
+        self.sql("INSERT INTO messages(conv_key,from_id,to_id,body,created_at,recalled_at)"
+                 " VALUES (?,?,?,?,?,NULL)", (other_key, a, c, "不该出现在这段会话里",
+                                              "2026-10-19 00:00:04"))
+        self.assertEqual(self.ops.get("/api/users/%d/messages/export" % a,
+                                      headers=self.bearer).status_code, 422,
+                         "没给 with_user 也导出了")
+        r = self.ops.get("/api/users/%d/messages/export" % a,
+                         params={"with_user": b}, headers=self.bearer)
+        self.assertEqual(r.status_code, 200, r.text)
+        out = r.json()
+        self.assertEqual(len(out["messages"]), 2, "导出的条数不对：%d" % len(out["messages"]))
+        bodies = [m["body"] for m in out["messages"]]
+        self.assertIn("第一句正常话", bodies)
+        self.assertNotIn("这句要撤回", r.text, "撤回的消息正文漏出来了")
+        self.assertTrue(any(m["recalled"] for m in out["messages"]), "撤回标记丢了")
+        self.assertNotIn("不该出现在这段会话里", r.text, "把第三个人的会话也导出来了")
+        for word in ("password_hash", "pw_salt", "share_secret", "token_hash"):
+            self.assertNotIn(word, r.text, "会话导出带出了凭据列 " + word)
+        row = self.audits("export_dm")[-1]
+        self.assertEqual(row["after_json"]["with_user"], b)
+        self.assertEqual(row["after_json"]["messages"], 2)
+        self.assertNotIn("第一句正常话", json.dumps(self.audits("export_dm"), ensure_ascii=False),
+                         "会话正文落进审计了")
 
     def test_overview_counts_come_from_detail_tables_including_ones_directus_cannot_read(self):
         self.app.post("/api/weight/log", headers=self.auth(), json={"weight_jin": 151})

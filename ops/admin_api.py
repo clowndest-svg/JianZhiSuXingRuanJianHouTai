@@ -63,6 +63,15 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def read_images(raw) -> list:
+    """posts.images 存的是 JSON 数组；坏数据当空处理（只用于判断文件有没有被引用）。"""
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return [str(x) for x in data] if isinstance(data, list) else []
+
+
 def db(readonly: bool = False) -> sqlite3.Connection:
     """只读连接走 URI，写连接走普通路径。
     URI 里的 Windows 反斜杠会被 sqlite 当成文件名的一部分，所以必须换成正斜杠；
@@ -556,6 +565,24 @@ def audit_list(limit: int = 40, actor: str = Depends(actor_of)):
 # ---------------------------------------------------------------- 高危
 
 
+def dependent_rows(conn: sqlite3.Connection, uid: int) -> list[dict]:
+    """别人留在该用户帖子上的点赞/评论/收藏。它们引用的是帖子，不是发帖人；
+    只按 user_id 删用户行会留下"指向已删帖子"的外键，整笔删号会回滚。
+    只算别人的行（user_id<>?），避免与 user_refs 的清单重复计数。"""
+    out = []
+    for table, col in (("post_likes", "post_id"), ("comments", "post_id"),
+                       ("post_favorites", "post_id")):
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM %s WHERE %s IN (SELECT id FROM posts WHERE user_id=?)"
+                " AND user_id<>?" % (table, col), (uid, uid)).fetchone()[0]
+        except sqlite3.Error:
+            continue
+        if n:
+            out.append({"table": table, "column": col, "rows": n})
+    return out
+
+
 def _load_user_for_action(conn: sqlite3.Connection, uid: int, expect_username) -> sqlite3.Row:
     """所有高危动作的第一道闸：必须把用户名原样带回来，且与服务端查到的完全一致。
     这一条不是防"误点"，是防"看着列表第 3 行就动手"。"""
@@ -567,6 +594,79 @@ def _load_user_for_action(conn: sqlite3.Connection, uid: int, expect_username) -
     if row["username"] != str(expect_username).strip():
         raise HTTPException(status_code=409, detail="用户名与这个 id 对不上，动作没执行")
     return row
+
+
+@app.post("/api/users/{uid}/nickname")
+def rename_user(uid: int, body: dict, actor: str = Depends(actor_of)):
+    nick = str((body or {}).get("nickname") or "").strip()[:20]
+    if not nick:
+        raise HTTPException(status_code=422, detail="昵称不能为空（最多 20 字）")
+    conn = db()
+    try:
+        row = _load_user_for_action(conn, uid, (body or {}).get("expect_username"))
+        before = {"nickname": row["nickname"]}
+        conn.execute("UPDATE users SET nickname=? WHERE id=?", (nick, uid))
+        conn.commit()
+        audit(actor, "rename_user", "users", uid, before=before, after={"nickname": nick})
+        return {"code": 0, "nickname": nick}
+    finally:
+        conn.close()
+
+
+@app.get("/api/media/orphans")
+def media_orphans(actor: str = Depends(actor_of)):
+    """只报告，不删。文件名属于敏感列（docs/02 §3），这里只回数量与体积。"""
+    if not os.path.isdir(UPLOAD_DIR):
+        return {"files": 0, "referenced": 0, "orphans": None, "orphan_bytes": None,
+                "note": "上传目录不存在"}
+    names = {n for n in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, n))}
+    conn = db(readonly=True)
+    referenced = set()
+    try:
+        for row in conn.execute("SELECT photo_url FROM body_cycles WHERE photo_url IS NOT NULL AND photo_url<>''"):
+            referenced.add(os.path.basename(row[0]))
+        for row in conn.execute("SELECT avatar_url FROM profiles WHERE avatar_url IS NOT NULL AND avatar_url<>''"):
+            referenced.add(os.path.basename(row[0]))
+        for row in conn.execute("SELECT images FROM posts WHERE images IS NOT NULL AND images<>''"):
+            # posts.images 存的是 /uploads/xxx.jpg 这种带路径的 URL，和文件名比对前必须取 basename
+            for n in read_images(row[0]):
+                referenced.add(os.path.basename(n))
+    finally:
+        conn.close()
+    orphans = sorted(names - referenced)
+    size = 0
+    for n in orphans:
+        try:
+            size += os.path.getsize(os.path.join(UPLOAD_DIR, n))
+        except OSError:
+            pass
+    return {"files": len(names), "referenced": len(names & referenced), "orphans": len(orphans),
+            "orphan_bytes": size, "note": "只报告；清理请走主应用的 quarantine-orphans.py"}
+
+
+@app.get("/api/users/{uid}/messages/export")
+def export_messages(uid: int, with_user: int = 0, actor: str = Depends(actor_of)):
+    """导出某段会话（处理纠纷用）。已撤回的消息只给"已撤回"，正文不出。"""
+    if not with_user:
+        raise HTTPException(status_code=422, detail="要带 with_user（另一个人的 id）")
+    conn = db(readonly=True)
+    try:
+        a = conn.execute("SELECT id,username,public_id FROM users WHERE id=?", (uid,)).fetchone()
+        b = conn.execute("SELECT id,username,public_id FROM users WHERE id=?", (with_user,)).fetchone()
+        if not a or not b:
+            raise HTTPException(status_code=404, detail="会话一方不存在")
+        key = "%d:%d" % (min(uid, with_user), max(uid, with_user))
+        rows = conn.execute(
+            "SELECT id,from_id,to_id,body,created_at,recalled_at FROM messages "
+            "WHERE conv_key=? ORDER BY id ASC LIMIT 5000", (key,)).fetchall()
+        items = [{"id": int(r["id"]), "from_id": int(r["from_id"]), "to_id": int(r["to_id"]),
+                  "body": "" if r["recalled_at"] else r["body"],
+                  "recalled": bool(r["recalled_at"]), "created_at": r["created_at"]}
+                 for r in rows]
+    finally:
+        conn.close()
+    audit(actor, "export_dm", "users", uid, after={"with_user": with_user, "messages": len(items)})
+    return {"a": dict(a), "b": dict(b), "messages": items}
 
 
 @app.post("/api/users/{uid}/ban")
@@ -659,8 +759,11 @@ def delete_account(uid: int, body: dict, actor: str = Depends(actor_of)):
             if n:
                 plan.append({"table": table, "column": col, "rows": n})
                 total += n
+        dependents = dependent_rows(conn, uid)
+        total += sum(item["rows"] for item in dependents)
         if plan_only:
-            return {"code": 0, "plan": plan, "tables": len(plan), "rows": total}
+            return {"code": 0, "plan": plan, "dependents": dependents,
+                    "tables": len(plan) + len(dependents), "rows": total}
         want = (body or {}).get("confirm_rows")
         if want is None or int(want) != total:
             raise HTTPException(status_code=409,
@@ -670,6 +773,11 @@ def delete_account(uid: int, body: dict, actor: str = Depends(actor_of)):
         conn.isolation_level = None        # 手动管事务：默认模式下 sqlite3 会自己BEGIN，撞车
         conn.execute("PRAGMA defer_foreign_keys=ON")
         conn.execute("BEGIN IMMEDIATE")
+        # 先清别人留在他帖子上的互动，否则这些行会指向马上要删的帖子，外键校验必然失败
+        for item in dependents:
+            conn.execute(
+                "DELETE FROM %s WHERE %s IN (SELECT id FROM posts WHERE user_id=?) AND user_id<>?"
+                % (item["table"], item["column"]), (uid, uid))
         for item in plan:
             conn.execute("DELETE FROM %s WHERE %s=?" % (item["table"], item["column"]), (uid,))
         conn.execute("DELETE FROM users WHERE id=?", (uid,))
@@ -681,8 +789,10 @@ def delete_account(uid: int, body: dict, actor: str = Depends(actor_of)):
             raise HTTPException(status_code=500, detail="删除后外键不自洽，整笔回滚，账号还在")
         conn.execute("COMMIT")
         audit(actor, "delete_account", "users", uid, before=before,
-              after={"tables": len(plan), "rows": total}, note="已删")
-        return {"code": 0, "deleted_tables": len(plan), "deleted_rows": total}
+              after={"tables": len(plan) + len(dependents), "rows": total,
+                     "dependents": dependents}, note="已删")
+        return {"code": 0, "deleted_tables": len(plan) + len(dependents),
+                "deleted_rows": total, "dependents": dependents}
     except HTTPException:
         try:
             if conn.isolation_level is None:
