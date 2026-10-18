@@ -1,0 +1,16 @@
+# 秘密与本地数据永不入库
+/opt/
+*.key
+*.pem
+*.p7m
+.env
+env.local
+admin.json
+dev.db
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/baseline.local.json
