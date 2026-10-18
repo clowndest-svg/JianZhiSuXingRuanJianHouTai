@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>轻塑 · 运维台</title>
+<style>
+  /* 与 App 同一套视觉语言：胶囊按钮、浅绿底、悬停深绿底白字（r150 定下的规矩）。
+     不引外部 CDN：这台机器对外只有 IP，后台页面不该依赖第三方资源。 */
+  :root {
+    --green: #1f7a4d; --green-dark: #16603c; --green-soft: #e8f5e9;
+    --line: #d7e3da; --text: #1c2320; --muted: #5c6b62; --danger: #b3261e; --warn: #8a6d1b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f5f7f6; color: var(--text);
+         font: 15px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+           background: #fff; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 700; }
+  header .who { margin-left: auto; color: var(--muted); font-size: 13px; }
+  main { padding: 18px 20px 40px; max-width: 1180px; margin: 0 auto; }
+  nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  section { background: #fff; border: 1px solid var(--line); border-radius: 14px;
+            padding: 16px 18px; margin-bottom: 16px; }
+  section[hidden] { display: none; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  h3 { font-size: 13px; margin: 16px 0 6px; color: var(--muted); font-weight: 600; }
+  button { border: 0; border-radius: 999px; padding: 8px 15px; background: var(--green-soft);
+           color: var(--green-dark); font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: var(--green-dark); color: #fff; }
+  button.primary { background: var(--green); color: #fff; }
+  button.primary:hover { background: var(--green-dark); }
+  button.danger { background: #fdecea; color: var(--danger); }
+  button.danger:hover { background: var(--danger); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input, select { font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+                  border-radius: 10px; background: #fff; color: var(--text); }
+  input[type=text] { min-width: 220px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: #fbfdfb; }
+  .card b { display: block; font-size: 20px; }
+  .card span { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  pre { background: #f3f6f4; border-radius: 8px; padding: 8px; overflow: auto; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+  .ok { background: var(--green-soft); color: var(--green-dark); }
+  .bad { background: #fdecea; color: var(--danger); }
+  .mid { background: #fdf6e3; color: var(--warn); }
+  .muted { color: var(--muted); }
+  .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+           background: #212b26; color: #fff; padding: 10px 16px; border-radius: 999px;
+           font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80vw; }
+  #toast.show { opacity: .96; }
+</style>
+</head>
+<body>
+<header>
+  <h1>轻塑 · 运维台</h1>
+  <span class="who" id="who">未登录</span>
+  <button id="logout" hidden>退出</button>
+</header>
+
+<main>
+  <section id="login">
+    <h2>进入运维台</h2>
+    <div class="row">
+      <input type="password" id="token" placeholder="运维令牌（不记在本机，关掉页面就没了）" style="min-width:340px">
+      <button class="primary" id="dologin">登录</button>
+    </div>
+    <p class="note">令牌在服务器上的 <code>/opt/qingsu/admin/console.json</code>（root:600）。
+      这个页面只做"做错救不回来"的那几件事；看明细、改反馈状态请用数据控制台 <a href="/admin/">/admin/</a>。</p>
+  </section>
+
+  <nav id="nav" hidden>
+    <button data-go="overview">概览</button>
+    <button data-go="users">用户</button>
+    <button data-go="gate">强更门</button>
+    <button data-go="backup">备份</button>
+    <button data-go="audit">审计</button>
+  </nav>
+
+  <section id="overview" hidden>
+    <h2>概览</h2>
+    <div class="row"><button id="refresh">刷新</button><span class="muted" id="ovtime"></span></div>
+    <div id="ovcards" class="cards"></div>
+    <h3>待办</h3>
+    <div id="pending"></div>
+    <h3>属地分布（只到省）</h3>
+    <div id="regions"></div>
+    <h3>健康（主应用 / 容器 / 资源）</h3>
+    <div id="health"></div>
+    <p class="note" id="ovhint"></p>
+  </section>
+
+  <section id="users" hidden>
+    <h2>用户</h2>
+    <div class="row">
+      <input type="text" id="q" placeholder="用户名 / 昵称 / 轻塑号 / id">
+      <button id="search">查找</button>
+      <span class="muted">列表只出白名单列，凭据列在这里根本不会被查。</span>
+    </div>
+    <div id="utable"></div>
+    <p class="note">封号必须写原因——用户来问的时候，"已被停用"后面得跟得出话。
+      重置口令会同时撤销该用户全部会话；注销要先看服务端算出的待删行数再确认。</p>
+  </section>
+
+  <section id="gate" hidden>
+    <h2>强制更新门</h2>
+    <div id="gatestate"></div>
+    <h3>抬门（只许往上）</h3>
+    <div class="row">
+      <label>当前值 <input type="text" id="gcurrent" size="6"></label>
+      <label>抬到 <input type="text" id="gnew" size="6"></label>
+      <button class="primary" id="graise">确认抬门</button>
+    </div>
+    <h3>刹车（放开全部客户端）</h3>
+    <div class="row">
+      <input type="text" id="gphrase" placeholder="原样输入：放开全部客户端" style="min-width:260px">
+      <button class="danger" id="gbrake">拉刹车</button>
+    </div>
+    <p class="note">抬错的代价是旧包全体打不开，而且门只能再抬不能降；所以这里既不给"降门"按钮，
+      也要求把当前值原样带回。有没有真的生效，以下面回读的 /health/ready 为准，不看本页返回 200。</p>
+  </section>
+
+  <section id="backup" hidden>
+    <h2>数据备份</h2>
+    <div class="row"><button class="primary" id="dobackup">立即备份并校验</button><span class="muted" id="bkstate"></span></div>
+    <p class="note">跑主应用自己的 backup.py，完成后**读回快照做 integrity_check**，
+      不是 ok 就报失败——备份写出来了但库是坏的，脚本退出码照样是 0。</p>
+  </section>
+
+  <section id="audit" hidden>
+    <h2>操作审计</h2>
+    <div class="row"><button id="reload-audit">重新加载</button><span class="muted">最近 40 条</span></div>
+    <div id="atable"></div>
+    <p class="note">高危动作前后值都留痕；失败的尝试（比如撞令牌）也在里面。</p>
+  </section>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* 所有来自服务端的数据都要过 esc() 再进 HTML：昵称、正文、备注都是用户可控内容。 */
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v === null || v === undefined ? "" : v)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+let toastTimer = 0;
+function toast(msg, kind) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, kind === "keep" ? 12000 : 4200);
+}
+
+async function api(path, opts) {
+  const res = await fetch("api" + path, Object.assign({
+    headers: { "Content-Type": "application/json" }, credentials: "same-origin"
+  }, opts || {}));
+  let body = null;
+  try { body = await res.json(); } catch (e) { body = null; }
+  if (!res.ok) {
+    const detail = body && (body.detail || (body.errors && body.errors[0] && body.errors[0].message)) || ("HTTP " + res.status);
+    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    err.status = res.status; err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+function card(label, value, cls) {
+  return '<div class="card"><b class="' + (cls || "") + '">' + esc(value === null || value === undefined ? "无读数" : value)
+    + '</b><span>' + esc(label) + "</span></div>";
+}
+const tag = (text, cls) => '<span class="tag ' + cls + '">' + esc(text) + "</span>";
+
+/* ---------- 登录 ---------- */
+async function whoami() {
+  try {
+    const d = await api("/whoami");
+    $("who").textContent = "已登录：" + (d.actor === "script" ? "脚本令牌" : "本机会话");
+    $("login").hidden = true; $("nav").hidden = false; $("logout").hidden = false;
+    show("overview"); refreshAll();
+    return true;
+  } catch (e) {
+    $("who").textContent = "未登录";
+    $("login").hidden = false; $("nav").hidden = true; $("logout").hidden = true;
+    return false;
+  }
+}
+$("dologin").onclick = async () => {
+  const token = $("token").value.trim();
+  if (!token) { toast("先把令牌贴进来"); return; }
+  try {
+    await api("/login", { method: "POST", body: JSON.stringify({ token }) });
+    $("token").value = "";
+    await whoami();
+    toast("进来了");
+  } catch (e) { toast(e.message, "bad"); }
+};
+$("logout").onclick = async () => {
+  try { await api("/logout", { method: "POST", body: "{}" }); } catch (e) {}
+  $("login").hidden = false; $("nav").hidden = true; $("logout").hidden = true;
+  $("who").textContent = "未登录"; toast("已退出，本机不留令牌");
+};
+
+/* ---------- 分页 ---------- */
+function show(name) {
+  ["overview", "users", "gate", "backup", "audit"].forEach((s) => { $(s).hidden = s !== name; });
+  if (name === "overview") refreshAll();
+  if (name === "gate") refreshGate();
+  if (name === "audit") refreshAudit();
+}
+document.querySelectorAll("#nav button").forEach((b) => { b.onclick = () => show(b.dataset.go); });
+$("refresh").onclick = () => refreshAll();
+
+async function refreshAll() {
+  try {
+    const [ov, h] = await Promise.all([api("/overview"), api("/health")]);
+    $("ovtime").textContent = "运维读数时间 " + (h.ops_time || "");
+    const c = ov.counts || {};
+    $("ovcards").innerHTML = [
+      card("用户", c.users), card("帖子", c.posts), card("评论", c.comments),
+      card("点赞", c.post_likes), card("关注", c.follows), card("私信", c.messages),
+      card("会话", c.conversations), card("反馈", c.feedback), card("举报", c.content_reports),
+      card("被封号", ov.pending.banned, ov.pending.banned ? "bad" : "")
+    ].join("");
+    $("pending").innerHTML = "<ul>"
+      + "<li>待处理反馈：" + esc(ov.pending.feedback_new) + " 条</li>"
+      + "<li>待处理举报：" + esc(ov.pending.reports_open) + " 条</li>"
+      + "<li>被封账号：" + esc(ov.pending.banned) + " 个</li></ul>";
+    const r = ov.region || {};
+    $("regions").innerHTML = r.provinces && r.provinces.length
+      ? "<table><tr><th>省份</th><th>用户数</th></tr>" + r.provinces.map((p) =>
+          "<tr><td>" + esc(p.region) + "</td><td>" + esc(p.users) + "</td></tr>").join("") + "</table>"
+      : '<span class="muted">还没有人带上属地（登录时解析不到就留空，不写"未知"）。</span>'
+        + (r.hint ? '<p class="note">' + esc(r.hint) + "</p>" : "");
+    const keys = ov.keys || {}, chat = ov.chat || {}, gate = ov.gate || {};
+    const unreachable = (x) => x && x.unreachable ? tag("拿不到：" + x.unreachable, "bad") : "";
+    $("health").innerHTML = "<table>"
+      + row("主应用", h.app && h.app.unreachable ? tag("不可达 " + h.app.unreachable, "bad")
+            : tag("release " + (h.app.release || "?") + " · " + String(h.app.source_revision || "").slice(0, 7), "ok"))
+      + row("控制台容器", tag(h.console_container || "unknown", String(h.console_container || "").indexOf("running") === 0 ? "ok" : "bad"))
+      + row("磁盘空闲 / 内存", tag((h.disk_free_mb || 0) + " MB / " + (h.mem_mb && h.mem_mb.memavailable ? h.mem_mb.memavailable + " MB" : "?"), ""))
+      + row("强更门", tag("min_build " + esc(gate.min_build !== undefined ? gate.min_build : (h.app && h.app.min_build)) +
+            " · 被挡 " + esc((gate.blocked !== undefined ? gate.blocked : "?")), "mid"))
+      + row("私信在线", tag("连接 " + esc(chat.sockets !== undefined ? chat.sockets : "?") +
+            " · 用户 " + esc(chat.online !== undefined ? chat.online : "?") +
+            " · Redis " + (chat.redis ? "通" : "不通"), chat.redis ? "ok" : "bad"))
+      + row("签名密钥", keys.unreachable ? unreachable(keys)
+            : tag((keys.isolated ? "已隔离到独立目录" : "还和业务库同目录") +
+                  " · 被重建过：" + (keys.regenerated && keys.regenerated.length ? keys.regenerated.join(",") : "没有"),
+                  keys.regenerated && keys.regenerated.length ? "bad" : (keys.isolated ? "ok" : "mid")))
+      + row("最近备份", tag((h.recent_backups || []).join("、") || "没有", ""))
+      + "</table>";
+    $("ovhint").textContent = "计数全部由明细表现算；点赞/关注这类没有单列主键的表，"
+      + "数据控制台读不到，只能从这里看，两处不会各存一份数字。";
+  } catch (e) { toast("概览读失败：" + e.message); }
+}
+const row = (k, v) => "<tr><th>" + esc(k) + "</th><td>" + v + "</td></tr>";
+
+/* ---------- 用户 ---------- */
+$("search").onclick = () => loadUsers();
+$("q").addEventListener("keydown", (ev) => { if (ev.key === "Enter") loadUsers(); });
+
+async function loadUsers() {
+  try {
+    const d = await api("/users?limit=20&q=" + encodeURIComponent($("q").value.trim()));
+    if (!d.items.length) { $("utable").innerHTML = '<p class="muted">没找到人。支持 id、用户名、昵称、轻塑号。</p>'; return; }
+    $("utable").innerHTML = "<table><tr><th>id</th><th>用户名</th><th>昵称</th><th>轻塑号</th>"
+      + "<th>注册于</th><th>状态</th><th>会话</th><th>动作</th></tr>"
+      + d.items.map((u) => "<tr>"
+        + "<td>" + esc(u.id) + "</td><td>" + esc(u.username) + "</td><td>" + esc(u.nickname || "（没填）") + "</td>"
+        + "<td>" + esc(u.public_id || "（旧账号未补）") + "</td><td>" + esc((u.created_at || "").slice(0, 10)) + "</td>"
+        + "<td>" + (u.banned_at ? tag("停用：" + (u.ban_reason || "未写原因"), "bad") : tag("正常", "ok")) + "</td>"
+        + "<td>" + esc(u.sessions) + "</td>"
+        + '<td><div class="row">'
+        + (u.banned_at
+            ? '<button data-act="unban" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">解封</button>'
+            : '<button class="danger" data-act="ban" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">封号</button>')
+        + '<button data-act="revoke" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">撤销会话</button>'
+        + '<button data-act="reset" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">重置口令</button>'
+        + '<button data-act="export" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">导出</button>'
+        + '<button class="danger" data-act="delete" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">注销</button>'
+        + "</div></td></tr>").join("") + "</table>";
+  } catch (e) { toast("读用户失败：" + e.message); }
+}
+
+/* 高危动作一律先回显确认：把用户名（和注销时的行数）原样 typed 回来，服务端比对。 */
+function confirmEcho(title, name, extra) {
+  const typed = window.prompt(title + "\n\n必须原样输入用户名：" + name + (extra || ""), "");
+  return typed === name ? true : (toast("输入与原样用户名不一致，动作没发出"), false);
+}
+
+$("utable").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.dataset.id, name = btn.dataset.name, act = btn.dataset.act;
+  try {
+    if (act === "ban") {
+      if (!confirmEcho("封号 " + name, name)) return;
+      const reason = window.prompt("封号原因（会原样出现在用户打开 App 时的提示里）：", "");
+      if (!reason || !reason.trim()) { toast("不写原因就别封——用户只会看到一个谜"); return; }
+      await api("/users/" + id + "/ban", { method: "POST", body: JSON.stringify({ expect_username: name, reason: reason.trim() }) });
+      toast("已封号，主应用立刻开始拒绝该账号");
+    } else if (act === "unban") {
+      if (!confirmEcho("解封 " + name, name)) return;
+      await api("/users/" + id + "/unban", { method: "POST", body: JSON.stringify({ expect_username: name }) });
+      toast("已解封");
+    } else if (act === "revoke") {
+      if (!confirmEcho("撤销 " + name + " 的全部登录会话", name)) return;
+      const d = await api("/users/" + id + "/revoke-sessions", { method: "POST", body: JSON.stringify({ expect_username: name }) });
+      toast("撤销了 " + d.revoked + " 个会话");
+    } else if (act === "reset") {
+      if (!confirmEcho("重置 " + name + " 的口令（同时撤销全部会话）", name)) return;
+      const d = await api("/users/" + id + "/reset-password", { method: "POST", body: JSON.stringify({ expect_username: name }) });
+      toast("一次性口令：" + d.one_time_password + " ｜只显示这一次，关掉页面就没了 ｜已撤销 " + d.revoked_sessions + " 个会话", "keep");
+    } else if (act === "export") {
+      const d = await api("/users/" + id + "/export");
+      const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "qingsu-user-" + id + ".json";
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("导出完成（只含这个人自己的行，凭据列不在其中）");
+      return;
+    } else if (act === "delete") {
+      const plan = await api("/users/" + id + "/delete-account", {
+        method: "POST", body: JSON.stringify({ expect_username: name, plan_only: true }) });
+      const list = plan.plan.map((p) => p.table + "." + p.column + "=" + p.rows).join("，");
+      toast("将删 " + plan.tables + " 张表共 " + plan.rows + " 行：" + list, "keep");
+      const typed = window.prompt("注销是不可恢复的。\n\n要删的行数（服务端算出）：" + plan.rows
+        + "\n请把这个数字原样输入一遍：", "");
+      if (typed === null) return;
+      if (String(typed).trim() !== String(plan.rows)) { toast("数字对不上，什么都没删"); return; }
+      if (!confirmEcho("最后确认：注销 " + name, name)) return;
+      const d = await api("/users/" + id + "/delete-account", {
+        method: "POST", body: JSON.stringify({ expect_username: name, confirm_rows: Number(plan.rows) }) });
+      toast("已注销：" + d.deleted_tables + " 张表 " + d.deleted_rows + " 行");
+    }
+    loadUsers(); refreshAudit();
+  } catch (e) { toast("失败：" + e.message); }
+});
+
+/* ---------- 门 ---------- */
+async function refreshGate() {
+  try {
+    const g = await api("/gate");
+    $("gcurrent").value = g.override === null ? "" : g.override;
+    const seen = g.seen_builds ? Object.entries(g.seen_builds).map(([k, v]) => k + "×" + v).join(" ") : "（还没有读数）";
+    $("gatestate").innerHTML = "<table>"
+      + row("运维刹车值 override", tag(String(g.override), g.brake_on ? "mid" : "bad"))
+      + row("清单 min_version_code", tag(String(g.manifest_min), ""))
+      + row("清单最新构建", tag(String(g.manifest_code), ""))
+      + row("当前生效", tag(String(g.effective), ""))
+      + row("主应用自报 min_build", tag(String(g.min_build_reported_by_app === undefined ? "拿不到" : g.min_build_reported_by_app), ""))
+      + row("自上次重启见过的构建", tag(seen, ""))
+      + row("被挡请求数", tag(String(g.blocked_since_restart), ""))
+      + "</table>" + (g.note ? '<p class="note">' + esc(g.note) + "</p>" : "");
+    if (g.app_error) toast("主应用健康接口拿不到：" + g.app_error + " —— 生效值一律不可信");
+  } catch (e) { toast("读门失败：" + e.message); }
+}
+$("graise").onclick = async () => {
+  const cur = Number($("gcurrent").value), nw = Number($("gnew").value);
+  if (!Number.isFinite(cur) || !Number.isFinite(nw)) { toast("两个数都得填整数"); return; }
+  if (!window.confirm("把门从 " + cur + " 抬到 " + nw + "？低于 " + nw + " 的客户端会立刻打不开，且门只能再往上抬。")) return;
+  try {
+    const d = await api("/gate", { method: "POST", body: JSON.stringify({ expect_current: cur, new: nw }) });
+    toast("已写入 " + d.written + "；主应用回读 min_build=" + d.reported_by_app + "，被挡 " + d.blocked_now);
+    refreshGate();
+  } catch (e) { toast("抬门失败：" + e.message); }
+};
+$("gbrake").onclick = async () => {
+  if ($("gphrase").value.trim() !== "放开全部客户端") { toast("要把门放开，必须原样输入那句确认"); return; }
+  try {
+    const d = await api("/brake", { method: "POST", body: JSON.stringify({ phrase: "放开全部客户端" }) });
+    toast("刹车已拉下，现在生效值 " + d.effective_now + "（谁都不拦）");
+    $("gphrase").value = ""; refreshGate();
+  } catch (e) { toast("失败：" + e.message); }
+};
+
+/* ---------- 备份 ---------- */
+$("dobackup").onclick = async () => {
+  $("bkstate").textContent = "跑脚本中…（整库快照 + 媒体打包，可能要十几秒）";
+  try {
+    const d = await api("/backup", { method: "POST", body: "{}" });
+    $("bkstate").textContent = "快照 " + d.snapshot + " 校验 " + d.integrity;
+    toast("备份完成且校验通过：" + d.snapshot);
+  } catch (e) { $("bkstate").textContent = "失败"; toast("备份失败：" + e.message); }
+  refreshAll();
+};
+
+/* ---------- 审计 ---------- */
+async function refreshAudit() {
+  try {
+    const d = await api("/audit?limit=40");
+    $("atable").innerHTML = d.items.length ? "<table><tr><th>时间</th><th>谁</th><th>动作</th><th>对象</th>"
+      + "<th>前</th><th>后</th><th>备注</th></tr>" + d.items.map((a) => "<tr>"
+        + "<td>" + esc(a.created_at) + "</td><td>" + esc(a.actor) + "</td><td>" + esc(a.action) + "</td>"
+        + "<td>" + esc(a.target_kind) + "#" + esc(a.target_id) + "</td>"
+        + "<td><code>" + esc(short(a.before_json)) + "</code></td>"
+        + "<td><code>" + esc(short(a.after_json)) + "</code></td>"
+        + "<td>" + esc(a.note || "") + "</td></tr>").join("") + "</table>"
+      : '<p class="muted">还没有审计记录。</p>';
+  } catch (e) { toast("读审计失败：" + e.message); }
+}
+$("reload-audit").onclick = () => refreshAudit();
+function short(v) {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > 140 ? s.slice(0, 140) + "…" : s;
+}
+
+/* ---------- 起点 ---------- */
+whoami();
+</script>
+</body>
+</html>

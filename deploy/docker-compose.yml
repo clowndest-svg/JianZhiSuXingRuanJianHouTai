@@ -1,0 +1,45 @@
+name: qingsu-console
+
+# 这台机器只有 3.6G 内存、Directus 常驻约 223MiB（docs/03 §8 实测），
+# 所以这一层不做水平扩展、不加内存限制的"保险"也不做——先把资源说清楚。
+services:
+  directus:
+    image: directus/directus:11          # 11.17.4，已在服务器本地（1.16GB）
+    container_name: qingsu-console
+    restart: unless-stopped
+    # K-1：用应用 uid(993) 跑会起不来（/directus 内部要写 .directus 与 uploads，pm2 要可写 HOME）。
+    # K-2/K-3：用镜像原生 uid + 附加组 qingsu(993) + 数据目录 setgid，才能与主应用共享同一个 WAL 库。
+    user: "1000:1000"
+    group_add: ["993"]
+    environment:
+      DB_CLIENT: sqlite3
+      DB_FILENAME: /data/qingsu.db
+      # 必须与主应用同级(5000ms)。默认不等的话，撞上写锁会直接把 SQLITE_BUSY 抛给运营看。
+      DB_SQLITE_BUSY_TIMEOUT: "5000"
+      TELEMETRY: "false"
+      LOG_LEVEL: info
+      # PUBLIC_URL 的路径会被 Directus 当成 Data Studio 的前缀再叠一层它自己的 /admin，
+      # 写成 https://IP/admin/ 会得出 <base href="/admin/admin/">（实测），整站资源 404。
+      # Data Studio 原生就在 /admin，所以这里只给协议+主机，前缀交给 nginx 透传。
+      PUBLIC_URL: https://124.220.54.64
+      # K-6：.local 这类 TLD 会被 Directus 的邮箱校验拒掉并让 bootstrap 退出 1，必须是能过校验的地址。
+      ADMIN_EMAIL: ${DIRECTUS_ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${DIRECTUS_ADMIN_PASSWORD}
+      KEY: ${DIRECTUS_KEY}
+      SECRET: ${DIRECTUS_SECRET}
+    volumes:
+      # 只挂数据目录：/opt/qingsu/keys 不在里面，容器读不到签名密钥（docs/03 C-4，K-4 实测拒绝）
+      - /opt/qingsu/data:/data
+    ports:
+      # 绑在 docker 桥地址上，不是 127.0.0.1：nginx(qingsu-tls) 是另一个容器，
+      # 它那里的 127.0.0.1 是它自己，代理过来只会 502（本轮实测踩过）。
+      # 172.17.0.1 不可路由，公网进不来；这台机器没开 firewalld，只靠云安全组，
+      # 所以绝不能写成 "8055:8055" 或 "0.0.0.0:8055:8055"。
+      - "172.17.0.1:8055:8055"
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "fetch('http://127.0.0.1:8055/server/ping').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s

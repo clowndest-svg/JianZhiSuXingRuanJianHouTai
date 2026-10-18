@@ -1,0 +1,35 @@
+[Unit]
+Description=轻塑后台 · 运维 API（高危动作与审计）
+Documentation=file:///opt/qingsu/admin-console/docs/04-代码开发与执行.md
+After=network-online.target qingsu.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 以 root 跑的理由：要写 /opt/qingsu/backups（root:700）、要读 root:600 的 console.json、
+# 要改 data/min_build 这个门文件。代价是它建的 -wal/-shm 默认会是 root:root 0644，
+# 主应用（uid qingsu）就拿不到写位——那会直接演成"后台点了一下，全站变只读"。
+# 数据目录已经是 2770 setgid（新文件继承 group=qingsu），再配 UMask=0002 就是
+# root:qingsu 0660，两边都能写。这两行是一套，删一行就是把 F-1 放出来。
+User=root
+UMask=0002
+WorkingDirectory=/opt/qingsu/admin-console/ops
+Environment=PYTHONUNBUFFERED=1
+Environment=QINGSU_DB=/opt/qingsu/data/qingsu.db
+Environment=QINGSU_ADMIN_SECRETS=/opt/qingsu/admin/console.json
+Environment=QINGSU_MIN_BUILD_FILE=/opt/qingsu/data/min_build
+Environment=QINGSU_WEB_DIR=/opt/qingsu/web
+Environment=QINGSU_BACKUP_SCRIPT=/opt/qingsu/backup.py
+Environment=QINGSU_BACKUP_DIR=/opt/qingsu/backups/scheduled
+Environment=QINGSU_LOCAL_API=http://172.17.0.1:8000
+Environment=QINGSU_CONSOLE_CONTAINER=qingsu-console
+Environment=QINGSU_PYTHON_BIN=/usr/bin/python3
+# 绑 docker 桥地址（不是 127.0.0.1）：nginx 在另一个容器里，够不到本容器的回环。
+# 172.17.0.1 不可路由，公网进不来；但这台机器没开 firewalld，绝不允许改成 0.0.0.0。
+ExecStart=/usr/local/bin/uvicorn admin_api:app --host 172.17.0.1 --port 8100 --no-access-log
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
