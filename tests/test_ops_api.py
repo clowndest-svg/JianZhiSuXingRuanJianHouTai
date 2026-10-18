@@ -59,6 +59,9 @@ class OpsApi(unittest.TestCase):
 
         # env 就位之后才 import 主应用：它在 import 期就建目录、跑 migrate_db
         self.app_mod = load(APP_REPO / "server.py", "qingsu_app_for_ops")
+        # 本机若有真 Redis，限流计数会跨测试残留（实测：反馈口十分钟内会 429）。
+        # 和主应用集成测试一样打桩成"Redis 不可用"，让判据只看逻辑不看当天运气。
+        self.app_mod._redis_cmd = lambda *a, **k: (False, None)
         self.app = TestClient(self.app_mod.app)
         self.app_body = dict(username="opsowner", password="Review!123", age=30, height=170,
                              weight_jin=160, target_weight_jin=140)
@@ -123,6 +126,36 @@ class OpsApi(unittest.TestCase):
         return [a for a in rows if action is None or a["action"] == action]
 
     # ---- 鉴权 ----
+    def test_feedback_and_reports_lists_are_ready_to_work_from(self):
+        """运维页要能一眼看到"有什么要处理"，而不是只有计数。"""
+        # 直接落库：这条用例测的是运维 API 的列表，不测 App 的投递与限流
+        self.sql("INSERT INTO feedback(user_id,kind,body,page,app_build,contact,status,reply,created_at)"
+                 " VALUES (?,?,?,?,?,?,?,?,?)",
+                 (self.signup["id"], "bug", "运维页要看得到这条", "/me", 34, "", "new", "",
+                  "2026-10-19 00:00:00"))
+        fb = self.ops.get("/api/feedback?limit=5", headers=self.bearer).json()
+        self.assertTrue(fb.get("items"), "反馈列表是空的")
+        self.assertIn("new", fb.get("counts", {}), "状态计数里没有 new")
+        self.assertTrue(any("运维页要看得到" in (x.get("body") or "") for x in fb["items"]))
+        self.assertNotIn("password_hash", json.dumps(fb, ensure_ascii=False))
+        self.sql("INSERT INTO content_reports(target_kind,target_id,reporter,reason,created_at) "
+                 "VALUES ('post',1,?, '测试举报理由', '2026-10-18 23:00:00')", (self.signup["id"],))
+        rp = self.ops.get("/api/reports?limit=5", headers=self.bearer).json()
+        self.assertTrue(rp.get("items"), "举报列表是空的：%s" % json.dumps(rp, ensure_ascii=False)[:300])
+        self.assertIn("测试举报理由", json.dumps(rp, ensure_ascii=False))
+        self.assertNotIn("password_hash", json.dumps(rp, ensure_ascii=False))
+
+    def test_downstream_errors_are_not_masked_as_401(self):
+        """中间件曾把下游的任何异常都吞掉并返回 401——排查时看起来像"口令错"，实际是接口炸了。
+        这是本轮真实踩到的 bug，钉住：异常必须冒成 500。"""
+        @self.ops_mod.app.get("/api/__boom")
+        def boom():
+            raise RuntimeError("boom")
+        c = TestClient(self.ops_mod.app, headers=self.ops.headers, raise_server_exceptions=False)
+        r = c.get("/api/__boom")
+        self.assertNotEqual(r.status_code, 401, "下游异常又被当成未授权了")
+        self.assertEqual(r.status_code, 500, "异常没有被冒出来：%s" % r.status_code)
+
     def test_user_listing_finds_people_without_leaking_columns(self):
         self.assertEqual(self.ops.get("/api/users").status_code, 401)
         for term in ("opsowner", str(self.signup["id"]), "opsother"):
@@ -172,7 +205,8 @@ class OpsApi(unittest.TestCase):
     def test_every_data_endpoint_requires_auth(self):
         for path in ("/api/health", "/api/overview", "/api/gate", "/api/audit",
                      "/api/users", "/api/users/%d" % self.signup["id"],
-                     "/api/users/%d/export" % self.signup["id"]):
+                     "/api/users/%d/export" % self.signup["id"],
+                     "/api/feedback", "/api/reports"):
             self.assertEqual(self.ops.get(path).status_code, 401, path + " 不该免登录")
         for path, body in (("/api/users/%d/ban" % self.signup["id"], {"reason": "x"}),
                            ("/api/gate", {"expect_current": 0, "new": 1}),
@@ -425,6 +459,12 @@ class SeedContract(unittest.TestCase):
         self.assertIn('",".join(whitelist)', src, "读权限的 fields 没写成逗号分隔字符串")
         self.assertIn('",".join(fields)', src, "写权限的 fields 没写成逗号分隔字符串")
         self.assertNotIn("json.dumps(whitelist)", src, "又把 fields 写成 JSON 数组了")
+
+    def test_seed_registers_collection_meta(self):
+        """元数据不注册，控制台"内容"就是空的（实测：表在、接口能读、Studio 显示没有任何模型）。"""
+        src = (BACKEND / "directus" / "seed_policies.py").read_text(encoding="utf-8")
+        self.assertIn("directus_collections", src)
+        self.assertIn("ensure_collection_meta", src)
 
     def test_every_write_listed_field_is_inside_the_read_whitelist(self):
         src = (BACKEND / "directus" / "seed_policies.py").read_text(encoding="utf-8")

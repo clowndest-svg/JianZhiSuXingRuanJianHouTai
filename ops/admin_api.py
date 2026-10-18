@@ -263,13 +263,17 @@ async def basic_gate_middleware(request: Request, call_next):
                             headers={"WWW-Authenticate": challenge})
     header = request.headers.get("authorization", "")
     if header.startswith("Basic "):
+        raw = None
         try:
             raw = base64.b64decode(header[6:].strip()).decode("utf-8")
+        except Exception:
+            raw = None      # 解不开就等于没授权，不区分原因，免得给探测留差异信号
+        if raw:
             got_user, _, got_password = raw.partition(":")
             if hmac.compare_digest(got_user, user) and hmac.compare_digest(got_password, password):
+                # 注意：call_next 必须放在 try 外面。放在里面的话，下游任何异常都会被
+                # 这个 except 吞掉并返回 401——排查时看起来像"口令错"，实际是接口炸了（本轮踩过）。
                 return await call_next(request)
-        except Exception:
-            pass    # 解不开就等于没授权，不区分原因，免得给探测留差异信号
     return JSONResponse({"detail": "需要后台 Basic 口令"}, status_code=401,
                         headers={"WWW-Authenticate": challenge})
 
@@ -401,6 +405,45 @@ def overview(actor: str = Depends(actor_of)):
             "gate": (ready or {}).get("gate", {"unreachable": err}),
             "chat": (ready or {}).get("chat", {"unreachable": err}),
             "keys": (ready or {}).get("keys", {"unreachable": err})}
+
+
+@app.get("/api/feedback")
+def feedback_list(status: str = "", limit: int = 20, actor: str = Depends(actor_of)):
+    """运营页要能直接看到"有什么要处理"。只读、只出白名单列、正文截断。"""
+    limit = max(1, min(int(limit or 20), 50))
+    conn = db(readonly=True)
+    try:
+        sql = ("SELECT id,user_id,kind,status,substr(body,1,160) AS body,page,app_build,"
+               "contact,substr(reply,1,160) AS reply,created_at,replied_at FROM feedback")
+        params: list = []
+        if status:
+            sql += " WHERE status=?"; params.append(status)
+        sql += " ORDER BY id DESC LIMIT ?"; params.append(limit)
+        items = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        counts = {r[0]: r[1] for r in conn.execute(
+            "SELECT status, COUNT(*) FROM feedback GROUP BY status").fetchall()}
+        return {"items": items, "counts": counts}
+    finally:
+        conn.close()
+
+
+@app.get("/api/reports")
+def reports_list(limit: int = 20, actor: str = Depends(actor_of)):
+    limit = max(1, min(int(limit or 20), 50))
+    conn = db(readonly=True)
+    try:
+        # status/handled_* 是后台侧补的列，主应用的建表语句里没有（docs/02 A9 的 schema 漂移）。
+        # 所以按真实列裁剪，老库/新库都能读，不许假设它们一定存在。
+        have = {r[1] for r in conn.execute("PRAGMA table_info(content_reports)")}
+        wanted = ["id", "target_kind", "target_id", "reporter", "reason", "created_at",
+                  "status", "handled_at", "handled_note"]
+        picked = [c for c in wanted if c in have]
+        rows = conn.execute(
+            "SELECT %s FROM content_reports ORDER BY id DESC LIMIT ?" % ",".join(picked),
+            (limit,)).fetchall()
+        return {"items": [dict(r) for r in rows], "columns": picked}
+    finally:
+        conn.close()
 
 
 @app.get("/api/users")

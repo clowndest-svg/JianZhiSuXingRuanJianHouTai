@@ -17,6 +17,8 @@ services:
       # 必须与主应用同级(5000ms)。默认不等的话，撞上写锁会直接把 SQLITE_BUSY 抛给运营看。
       DB_SQLITE_BUSY_TIMEOUT: "5000"
       TELEMETRY: "false"
+      # 控制台默认中文：不设的话新会话一律英文（实测）
+      DEFAULT_LANGUAGE: "zh-CN"
       LOG_LEVEL: info
       # PUBLIC_URL 的路径会被 Directus 当成 Data Studio 的前缀再叠一层它自己的 /admin，
       # 写成 https://IP/admin/ 会得出 <base href="/admin/admin/">（实测），整站资源 404。

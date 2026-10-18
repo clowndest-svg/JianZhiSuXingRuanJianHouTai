@@ -77,6 +77,9 @@
       这个页面只做"做错救不回来"的那几件事；看明细、改反馈状态请用数据控制台 <a href="/admin/">/admin/</a>。</p>
   </section>
 
+  <p class="note" id="hint" hidden>这里只做“做错救不回来”的事：封号、注销、重置口令、抬门、备份。
+    看数据、改反馈状态、下架帖子请去 <a href="/admin/" target="_blank" rel="noopener">/admin/ 数据控制台</a>；
+    点赞/关注/喝水这类没有单列主键的表只能在这里看。</p>
   <nav id="nav" hidden>
     <button data-go="overview">概览</button>
     <button data-go="users">用户</button>
@@ -91,6 +94,10 @@
     <div id="ovcards" class="cards"></div>
     <h3>待办</h3>
     <div id="pending"></div>
+    <h3>最近反馈（处理去 <a href="/admin/" target="_blank" rel="noopener">数据控制台</a>）</h3>
+    <div id="feedback"></div>
+    <h3>最近举报（处理去 <a href="/admin/" target="_blank" rel="noopener">数据控制台</a>）</h3>
+    <div id="reports"></div>
     <h3>属地分布（只到省）</h3>
     <div id="regions"></div>
     <h3>健康（主应用 / 容器 / 资源）</h3>
@@ -188,7 +195,7 @@ async function whoami() {
   try {
     const d = await api("/whoami");
     $("who").textContent = "已登录：" + (d.actor === "script" ? "脚本令牌" : "本机会话");
-    $("login").hidden = true; $("nav").hidden = false; $("logout").hidden = false;
+    $("login").hidden = true; $("nav").hidden = false; $("logout").hidden = false; $("hint").hidden = false;
     show("overview"); refreshAll();
     return true;
   } catch (e) {
@@ -217,6 +224,7 @@ $("logout").onclick = async () => {
 function show(name) {
   ["overview", "users", "gate", "backup", "audit"].forEach((s) => { $(s).hidden = s !== name; });
   if (name === "overview") refreshAll();
+  if (name === "users" && !$("utable").innerHTML.trim()) loadUsers();
   if (name === "gate") refreshGate();
   if (name === "audit") refreshAudit();
 }
@@ -225,7 +233,8 @@ $("refresh").onclick = () => refreshAll();
 
 async function refreshAll() {
   try {
-    const [ov, h] = await Promise.all([api("/overview"), api("/health")]);
+    const [ov, h, fb, rp] = await Promise.all([api("/overview"), api("/health"),
+      api("/feedback?limit=5"), api("/reports?limit=5")]);
     $("ovtime").textContent = "运维读数时间 " + (h.ops_time || "");
     const c = ov.counts || {};
     $("ovcards").innerHTML = [
@@ -238,6 +247,21 @@ async function refreshAll() {
       + "<li>待处理反馈：" + esc(ov.pending.feedback_new) + " 条</li>"
       + "<li>待处理举报：" + esc(ov.pending.reports_open) + " 条</li>"
       + "<li>被封账号：" + esc(ov.pending.banned) + " 个</li></ul>";
+    const statusName = { new: "待处理", doing: "处理中", done: "已处理", wontfix: "暂不做" };
+    $("feedback").innerHTML = fb.items && fb.items.length
+      ? "<table><tr><th>#</th><th>类型</th><th>正文</th><th>状态</th><th>提交</th></tr>"
+        + fb.items.map((f) => "<tr><td>" + esc(f.id) + "</td><td>" + esc(f.kind) + "</td><td>"
+            + esc(f.body) + "</td><td>" + tag(statusName[f.status] || f.status, f.status === "new" ? "mid" : "ok")
+            + "</td><td>" + esc(String(f.created_at || "").slice(0, 16)) + "</td></tr>").join("")
+        + "</table>"
+      : '<span class="muted">还没有反馈。</span>';
+    $("reports").innerHTML = rp.items && rp.items.length
+      ? "<table><tr><th>#</th><th>对象</th><th>理由</th><th>状态</th><th>提交</th></tr>"
+        + rp.items.map((x) => "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.target_kind) + "#"
+            + esc(x.target_id) + "</td><td>" + esc(x.reason) + "</td><td>" + esc(x.status || "new")
+            + "</td><td>" + esc(String(x.created_at || "").slice(0, 16)) + "</td></tr>").join("")
+        + "</table>"
+      : '<span class="muted">还没有举报。</span>';
     const r = ov.region || {};
     $("regions").innerHTML = r.provinces && r.provinces.length
       ? "<table><tr><th>省份</th><th>用户数</th></tr>" + r.provinces.map((p) =>

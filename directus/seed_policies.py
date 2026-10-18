@@ -69,6 +69,25 @@ def cols_of(c, table):
     return [r[1] for r in c.execute("PRAGMA table_info(%s)" % table)]
 
 
+def ensure_collection_meta(c, tables):
+    """把已存在的业务表注册成"受管理集合"。
+
+    为什么不注册就会空：Directus 的"内容"导航读的是 directus_collections 元数据，
+    不是数据库里的表。表存在、接口能读，但元数据 0 行时 Studio 显示"没有任何模型"（实测）。
+    POST /collections 会以"已存在"拒绝，所以这里直接补 meta 行（只加展示元数据，不动表结构）。
+    """
+    have = {r[0] for r in c.execute("SELECT collection FROM directus_collections")}
+    added = []
+    for t in tables:
+        if t in have:
+            continue
+        c.execute("INSERT INTO directus_collections"
+                  "(collection,icon,note,hidden,singleton,archive_app_filter,accountability)"
+                  " VALUES (?,?,?,0,0,1,'all')", (t, "box", ""))
+        added.append(t)
+    return added
+
+
 def ensure_report_status(c):
     """举报表原本没有状态列：投进去就沉底，M-31"处理完不再出现在待处理里"在结构上无处落脚。
     这里补三列（都带默认值，主应用不读它们，所以行为不变）。
@@ -145,9 +164,11 @@ def main() -> int:
             actions.append("%s.%s" % (t, action))
         granted.append(t)
 
+    meta_added = ensure_collection_meta(c, granted)
     c.commit()
     c.close()
-    print(json.dumps({"补的列": added, "可服务表": len(servable), "复合主键被忽略": ignored,
+    print(json.dumps({"补的列": added, "注册的集合元数据": meta_added,
+                      "可服务表": len(servable), "复合主键被忽略": ignored,
                       "授权": actions, "隐藏": hidden, "角色": role_id, "策略": policy_id},
                      ensure_ascii=False, indent=1))
     print("NEXT: docker restart qingsu-console（权限有进程内缓存，不重启读不到）")
