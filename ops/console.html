@@ -21,6 +21,7 @@
   header .who { margin-left: auto; color: var(--muted); font-size: 13px; }
   main { padding: 18px 20px 40px; max-width: 1180px; margin: 0 auto; }
   nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  nav[hidden] { display: none; }
   section { background: #fff; border: 1px solid var(--line); border-radius: 14px;
             padding: 16px 18px; margin-bottom: 16px; }
   section[hidden] { display: none; }
@@ -57,6 +58,39 @@
            background: #212b26; color: #fff; padding: 10px 16px; border-radius: 999px;
            font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80vw; }
   #toast.show { opacity: .96; }
+  nav button.active { background: var(--green); color: #fff; }
+  .workspace { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.4fr); gap: 14px; }
+  .queue { display: grid; align-content: start; gap: 8px; max-height: 68vh; overflow: auto; }
+  .queue-item { width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 12px;
+                background: #fff; padding: 12px; }
+  .queue-item.selected { border-color: var(--green); box-shadow: 0 0 0 2px #1f7a4d22; }
+  .queue-item strong, .queue-item small { display: block; }
+  .queue-item small { color: var(--muted); font-weight: 400; margin-top: 4px; }
+  .queue-item .preview { display: block; margin-top: 7px; color: var(--text); font-weight: 400;
+                         overflow-wrap: anywhere; }
+  .detail { min-width: 0; }
+  .detail-body { white-space: pre-wrap; overflow-wrap: anywhere; background: #f7faf8;
+                 border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .detail textarea { width: 100%; min-height: 112px; resize: vertical; font: inherit; padding: 10px;
+                     border: 1px solid var(--line); border-radius: 10px; }
+  .detail label { display: block; margin: 10px 0 5px; font-size: 13px; color: var(--muted); }
+  .queue-empty { padding: 18px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); }
+  .table-wrap { overflow-x: auto; }
+  @media (max-width: 720px) {
+    header { padding: 10px 12px; }
+    main { padding: 12px 10px 28px; }
+    nav { position: sticky; top: 56px; z-index: 4; flex-wrap: nowrap; overflow-x: auto; padding: 4px 0 8px;
+          margin: 0 -2px 10px; scrollbar-width: thin; }
+    nav button { flex: 0 0 auto; padding: 8px 12px; }
+    section { padding: 13px 12px; border-radius: 12px; }
+    .workspace { grid-template-columns: minmax(0,1fr); }
+    .queue { max-height: 38vh; }
+    input[type=text], #token { min-width: 0 !important; width: 100%; }
+    .row { align-items: stretch; }
+    .row > label { display: flex; align-items: center; gap: 6px; }
+    table { min-width: 580px; }
+    #toast { bottom: 14px; max-width: calc(100vw - 24px); border-radius: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -74,14 +108,14 @@
       <button class="primary" id="dologin">登录</button>
     </div>
     <p class="note">令牌在服务器上的 <code>/opt/qingsu/admin/console.json</code>（root:600）。
-      这个页面只做"做错救不回来"的那几件事；看明细、改反馈状态请用数据控制台 <a href="/admin/">/admin/</a>。</p>
+      登录后可处理反馈与举报；高风险账号操作仍要求二次确认。</p>
   </section>
 
-  <p class="note" id="hint" hidden>这里只做“做错救不回来”的事：封号、注销、重置口令、抬门、备份。
-    看数据、改反馈状态、下架帖子请去 <a href="/admin/" target="_blank" rel="noopener">/admin/ 数据控制台</a>；
-    点赞/关注/喝水这类没有单列主键的表只能在这里看。</p>
+  <p class="note" id="hint" hidden>工单、举报、账号与发布运维都在这里处理；点赞、关注、喝水等汇总数字由服务端实时统计。</p>
   <nav id="nav" hidden>
     <button data-go="overview">概览</button>
+    <button data-go="feedback-workspace">反馈工单</button>
+    <button data-go="reports-workspace">举报审核</button>
     <button data-go="users">用户</button>
     <button data-go="gate">强更门</button>
     <button data-go="backup">备份</button>
@@ -94,15 +128,43 @@
     <div id="ovcards" class="cards"></div>
     <h3>待办</h3>
     <div id="pending"></div>
-    <h3>最近反馈（处理去 <a href="/admin/" target="_blank" rel="noopener">数据控制台</a>）</h3>
+    <div class="row"><h3>最近反馈</h3><button data-go="feedback-workspace">打开工单</button></div>
     <div id="feedback"></div>
-    <h3>最近举报（处理去 <a href="/admin/" target="_blank" rel="noopener">数据控制台</a>）</h3>
+    <div class="row"><h3>最近举报</h3><button data-go="reports-workspace">打开审核</button></div>
     <div id="reports"></div>
     <h3>属地分布（只到省）</h3>
     <div id="regions"></div>
     <h3>健康（主应用 / 容器 / 资源）</h3>
     <div id="health"></div>
     <p class="note" id="ovhint"></p>
+  </section>
+
+  <section id="feedback-workspace" hidden>
+    <h2>反馈工单</h2>
+    <div class="row">
+      <label for="fb-filter">状态</label>
+      <select id="fb-filter"><option value="">全部状态</option><option value="new">待处理</option>
+        <option value="doing">处理中</option><option value="done">已处理</option><option value="wontfix">暂不做</option></select>
+      <button id="fb-refresh">刷新</button><span class="muted" id="fb-counts"></span>
+    </div>
+    <div class="workspace">
+      <div id="fb-list" class="queue"><div class="queue-empty">正在读取反馈…</div></div>
+      <article id="fb-detail" class="detail"><div class="queue-empty">选择一条反馈查看详情并回复。</div></article>
+    </div>
+  </section>
+
+  <section id="reports-workspace" hidden>
+    <h2>举报审核</h2>
+    <div class="row">
+      <label for="report-filter">队列</label>
+      <select id="report-filter"><option value="open">待处理</option><option value="actioned">已下架</option>
+        <option value="dismissed">已驳回</option><option value="all">全部</option></select>
+      <button id="report-refresh">刷新</button><span class="muted" id="report-counts"></span>
+    </div>
+    <div class="workspace">
+      <div id="report-list" class="queue"><div class="queue-empty">正在读取举报…</div></div>
+      <article id="report-detail" class="detail"><div class="queue-empty">选择一条举报查看内容与处理记录。</div></article>
+    </div>
   </section>
 
   <section id="users" hidden>
@@ -222,19 +284,26 @@ $("logout").onclick = async () => {
 
 /* ---------- 分页 ---------- */
 function show(name) {
-  ["overview", "users", "gate", "backup", "audit"].forEach((s) => { $(s).hidden = s !== name; });
+  ["overview", "feedback-workspace", "reports-workspace", "users", "gate", "backup", "audit"]
+    .forEach((s) => { $(s).hidden = s !== name; });
+  document.querySelectorAll("#nav [data-go]").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
   if (name === "overview") refreshAll();
+  if (name === "feedback-workspace") loadFeedback();
+  if (name === "reports-workspace") loadReports();
   if (name === "users" && !$("utable").innerHTML.trim()) loadUsers();
   if (name === "gate") refreshGate();
   if (name === "audit") refreshAudit();
 }
-document.querySelectorAll("#nav button").forEach((b) => { b.onclick = () => show(b.dataset.go); });
+document.addEventListener("click", (ev) => {
+  const button = ev.target.closest("[data-go]");
+  if (button) show(button.dataset.go);
+});
 $("refresh").onclick = () => refreshAll();
 
 async function refreshAll() {
   try {
     const [ov, h, fb, rp, media] = await Promise.all([api("/overview"), api("/health"),
-      api("/feedback?limit=5"), api("/reports?limit=5"), api("/media/orphans")]);
+      api("/feedback?limit=5"), api("/reports?status=open&limit=5"), api("/media/orphans")]);
     $("ovtime").textContent = "运维读数时间 " + (h.ops_time || "");
     const c = ov.counts || {};
     $("ovcards").innerHTML = [
@@ -247,8 +316,8 @@ async function refreshAll() {
       card("孤儿占用", media.orphan_bytes === null ? "无读数" : (Math.round(media.orphan_bytes / 1024) + " KB"), "")
     ].join("");
     $("pending").innerHTML = "<ul>"
-      + "<li>待处理反馈：" + esc(ov.pending.feedback_new) + " 条</li>"
-      + "<li>待处理举报：" + esc(ov.pending.reports_open) + " 条</li>"
+      + "<li><button data-go=\"feedback-workspace\">待处理反馈：" + esc(ov.pending.feedback_new) + " 条</button></li>"
+      + "<li><button data-go=\"reports-workspace\">待处理举报：" + esc(ov.pending.reports_open) + " 条</button></li>"
       + "<li>被封账号：" + esc(ov.pending.banned) + " 个</li></ul>";
     const statusName = { new: "待处理", doing: "处理中", done: "已处理", wontfix: "暂不做" };
     $("feedback").innerHTML = fb.items && fb.items.length
@@ -294,6 +363,180 @@ async function refreshAll() {
   } catch (e) { toast("概览读失败：" + e.message); }
 }
 const row = (k, v) => "<tr><th>" + esc(k) + "</th><td>" + v + "</td></tr>";
+
+/* ---------- 反馈工单 ---------- */
+const feedbackStatusName = { new: "待处理", doing: "处理中", done: "已处理", wontfix: "暂不做" };
+let feedbackItems = [];
+let selectedFeedbackId = 0;
+let selectedFeedback = null;
+$("fb-refresh").onclick = () => loadFeedback(selectedFeedbackId);
+$("fb-filter").onchange = () => loadFeedback();
+$("fb-list").addEventListener("click", (ev) => {
+  const button = ev.target.closest("[data-fb-id]");
+  if (button) openFeedback(Number(button.dataset.fbId));
+});
+$("fb-detail").addEventListener("click", async (ev) => {
+  if (!ev.target.closest("#save-feedback") || !selectedFeedback) return;
+  const status = $("fb-status").value, reply = $("fb-reply").value;
+  const button = $("save-feedback");
+  button.disabled = true;
+  try {
+    await api("/feedback/" + selectedFeedbackId, { method: "PATCH",
+      body: JSON.stringify({ expected_status: selectedFeedback.status, status, reply }) });
+    toast("反馈已保存，用户端可以看到状态和回复");
+    await loadFeedback(selectedFeedbackId);
+    refreshAudit();
+  } catch (e) {
+    toast("保存失败：" + e.message);
+    if (e.status === 409) await loadFeedback(selectedFeedbackId);
+  } finally {
+    if ($("save-feedback")) $("save-feedback").disabled = false;
+  }
+});
+
+async function loadFeedback(preferredId) {
+  $("fb-list").innerHTML = '<div class="queue-empty">正在读取反馈…</div>';
+  try {
+    const status = $("fb-filter").value;
+    const d = await api("/feedback?status=" + encodeURIComponent(status) + "&limit=50");
+    feedbackItems = d.items || [];
+    const counts = d.counts || {};
+    $("fb-counts").textContent = "待处理 " + (counts.new || 0) + " · 处理中 " + (counts.doing || 0)
+      + " · 已处理 " + (counts.done || 0) + " · 暂不做 " + (counts.wontfix || 0);
+    if (!feedbackItems.length) {
+      $("fb-list").innerHTML = '<div class="queue-empty">这个筛选下没有反馈。</div>';
+      $("fb-detail").innerHTML = '<div class="queue-empty">选择其他状态查看历史工单。</div>';
+      selectedFeedback = null; selectedFeedbackId = 0; return;
+    }
+    $("fb-list").innerHTML = feedbackItems.map((f) =>
+      '<button type="button" class="queue-item' + (Number(f.id) === Number(preferredId) ? " selected" : "")
+        + '" data-fb-id="' + Number(f.id) + '"><strong>#' + Number(f.id) + " · "
+        + esc(feedbackStatusName[f.status] || f.status) + " · " + esc(f.kind) + "</strong><small>"
+        + esc(f.created_at) + " · " + esc(f.user_id == null ? "匿名用户" : "用户 #" + f.user_id)
+        + "</small><span class=\"preview\">" + esc(f.body || "") + "</span></button>").join("");
+    const chosen = feedbackItems.find((f) => Number(f.id) === Number(preferredId)) || feedbackItems[0];
+    await openFeedback(Number(chosen.id));
+  } catch (e) {
+    $("fb-list").innerHTML = '<div class="queue-empty">读取失败：' + esc(e.message) + "</div>";
+    toast("反馈读取失败：" + e.message);
+  }
+}
+
+async function openFeedback(id) {
+  try {
+    const f = await api("/feedback/" + id);
+    selectedFeedback = f; selectedFeedbackId = Number(id);
+    $("fb-list").querySelectorAll("[data-fb-id]").forEach((b) =>
+      b.classList.toggle("selected", Number(b.dataset.fbId) === Number(id)));
+    const statusOptions = Object.entries(feedbackStatusName).map(([value, label]) =>
+      '<option value="' + value + '"' + (f.status === value ? " selected" : "") + ">" + label + "</option>").join("");
+    $("fb-detail").innerHTML = "<h3>反馈 #" + Number(f.id) + " · " + esc(f.kind) + "</h3>"
+      + '<div class="detail-body">' + esc(f.body || "") + "</div>"
+      + '<p class="note">提交者：' + esc(f.username || (f.user_id == null ? "匿名用户" : "用户 #" + f.user_id))
+      + " · 页面：" + esc(f.page || "未记录") + " · build：" + esc(f.app_build)
+      + " · 联系方式：" + esc(f.contact || "未留") + " · 提交时间：" + esc(f.created_at) + "</p>"
+      + '<label for="fb-status">处理状态</label><select id="fb-status">' + statusOptions + "</select>"
+      + '<label for="fb-reply">回复用户（最多 800 字）</label><textarea id="fb-reply" maxlength="800">'
+      + esc(f.reply || "") + '</textarea><div class="row"><button class="primary" id="save-feedback">保存处理并通知用户</button>'
+      + '<span class="note">保存后用户可在 App 的“我的反馈”中查看。</span></div>';
+  } catch (e) { toast("反馈详情读取失败：" + e.message); }
+}
+
+/* ---------- 举报审核 ---------- */
+const reportStatusName = { open: "待处理", actioned: "已下架", dismissed: "已驳回" };
+let reportItems = [];
+let selectedReportId = 0;
+let selectedReport = null;
+$("report-refresh").onclick = () => loadReports(selectedReportId);
+$("report-filter").onchange = () => loadReports();
+$("report-list").addEventListener("click", (ev) => {
+  const button = ev.target.closest("[data-report-id]");
+  if (button) openReport(Number(button.dataset.reportId));
+});
+$("report-detail").addEventListener("click", async (ev) => {
+  const button = ev.target.closest("[data-report-action]");
+  if (!button || !selectedReport || selectedReport.status !== "open") return;
+  const action = button.dataset.reportAction, report = selectedReport;
+  const note = $("report-note").value.trim();
+  if (note.length < 2) { toast("先填写至少 2 字的处理说明"); $("report-note").focus(); return; }
+  if (action === "dismiss" && !window.confirm("驳回举报 #" + report.id + "？举报记录会保留。")) return;
+  if (action === "remove") {
+    if (!report.target) { toast("举报对象已不存在，不能执行下架"); return; }
+    const kind = report.target_kind === "post" ? "帖子" : "评论";
+    if (!window.confirm("将" + kind + " #" + report.target_id + "软下架，记录保留且可追溯。")) return;
+    const typed = window.prompt("请原样输入以确认：" + kind + " #" + report.target_id, "");
+    if (typed !== kind + " #" + report.target_id) { toast("确认文字不匹配，未执行"); return; }
+  }
+  button.disabled = true;
+  try {
+    await api("/reports/" + report.id + "/resolve", { method: "POST",
+      body: JSON.stringify({ action, expected_status: report.status, note }) });
+    toast(action === "remove" ? "内容已软下架，举报记入已处理" : "举报已驳回，记录已保留");
+    await loadReports();
+    refreshAudit(); refreshAll();
+  } catch (e) {
+    toast("处理失败：" + e.message);
+    if (e.status === 409) await loadReports(report.id);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function loadReports(preferredId) {
+  $("report-list").innerHTML = '<div class="queue-empty">正在读取举报…</div>';
+  try {
+    const status = $("report-filter").value;
+    const d = await api("/reports?status=" + encodeURIComponent(status) + "&limit=50");
+    reportItems = d.items || [];
+    const counts = d.counts || {};
+    $("report-counts").textContent = "待处理 " + (counts.open || 0) + " · 已下架 "
+      + (counts.actioned || 0) + " · 已驳回 " + (counts.dismissed || 0);
+    if (!reportItems.length) {
+      $("report-list").innerHTML = '<div class="queue-empty">这个队列目前为空。</div>';
+      $("report-detail").innerHTML = '<div class="queue-empty">没有可显示的举报。</div>';
+      selectedReport = null; selectedReportId = 0; return;
+    }
+    $("report-list").innerHTML = reportItems.map((x) =>
+      '<button type="button" class="queue-item' + (Number(x.id) === Number(preferredId) ? " selected" : "")
+        + '" data-report-id="' + Number(x.id) + '"><strong>#' + Number(x.id) + " · "
+        + esc(reportStatusName[x.status] || x.status) + " · "
+        + esc(x.target_kind === "post" ? "帖子" : x.target_kind === "comment" ? "评论" : x.target_kind)
+        + " #" + esc(x.target_id) + "</strong><small>" + esc(x.created_at)
+        + " · 举报人 " + esc(x.reporter_name || ("用户 #" + x.reporter)) + "</small><span class=\"preview\">"
+        + esc(x.reason) + "</span></button>").join("");
+    const chosen = reportItems.find((x) => Number(x.id) === Number(preferredId)) || reportItems[0];
+    openReport(Number(chosen.id));
+  } catch (e) {
+    $("report-list").innerHTML = '<div class="queue-empty">读取失败：' + esc(e.message) + "</div>";
+    toast("举报读取失败：" + e.message);
+  }
+}
+
+function openReport(id) {
+  const x = reportItems.find((item) => Number(item.id) === Number(id));
+  if (!x) return;
+  selectedReport = x; selectedReportId = Number(id);
+  $("report-list").querySelectorAll("[data-report-id]").forEach((b) =>
+    b.classList.toggle("selected", Number(b.dataset.reportId) === Number(id)));
+  const target = x.target;
+  const targetText = target ? target.body : "举报对象已不存在";
+  const canAct = x.status === "open";
+  const canRemove = canAct && !!target && target.status === "open";
+  const targetAuthor = target && target.author ? target.author : "已注销用户";
+  $("report-detail").innerHTML = "<h3>举报 #" + Number(x.id) + " · " + esc(reportStatusName[x.status] || x.status) + "</h3>"
+    + '<p class="note">对象：' + esc(x.target_kind === "post" ? "帖子" : "评论") + " #" + esc(x.target_id)
+    + " · 举报人：" + esc(x.reporter_name || ("用户 #" + x.reporter)) + " · " + esc(x.created_at) + "</p>"
+    + '<h3>举报理由</h3><div class="detail-body">' + esc(x.reason) + "</div>"
+    + '<h3>被举报内容 · ' + esc(targetAuthor) + " · " + esc(target ? target.status : "已删除") + "</h3>"
+    + '<div class="detail-body">' + esc(targetText) + "</div>"
+    + (x.handled_at ? '<p class="note">处理时间：' + esc(x.handled_at) + " · 处理说明：" + esc(x.handled_note || "未填写") + "</p>" : "")
+    + (canAct ? '<label for="report-note">处理说明（2–400 字，会保留在审计记录中）</label>'
+        + '<textarea id="report-note" maxlength="400" placeholder="简要说明处理依据"></textarea><div class="row">'
+        + '<button data-report-action="dismiss">驳回举报</button>'
+        + '<button class="danger" data-report-action="remove"' + (canRemove ? "" : " disabled")
+        + '>软下架内容</button></div>'
+        : '<p class="note">这条举报已处理，记录仍保留供追溯。</p>');
+}
 
 /* ---------- 用户 ---------- */
 $("search").onclick = () => loadUsers();

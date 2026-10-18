@@ -145,6 +145,20 @@ def audit(actor: str, action: str, target_kind: str = "", target_id: str = "",
         conn.close()
 
 
+def audit_in(conn: sqlite3.Connection, actor: str, action: str,
+             target_kind: str = "", target_id: str = "",
+             before=None, after=None, note: str = "") -> None:
+    """Write an audit row in the caller's transaction for moderation workflows."""
+    conn.execute(AUDIT_SQL)
+    conn.execute("INSERT INTO admin_audit"
+                 "(actor,action,target_kind,target_id,before_json,after_json,note,created_at)"
+                 " VALUES (?,?,?,?,?,?,?,?)",
+                 (actor, action, target_kind, str(target_id),
+                  json.dumps(before, ensure_ascii=False, default=str) if before is not None else "",
+                  json.dumps(after, ensure_ascii=False, default=str) if after is not None else "",
+                  str(note)[:400], now_iso()))
+
+
 # ---------------------------------------------------------------- 口令
 
 
@@ -398,7 +412,7 @@ def overview(actor: str = Depends(actor_of)):
             "ORDER BY users DESC LIMIT 12").fetchall()]
         pending = {
             "feedback_new": conn.execute("SELECT COUNT(*) FROM feedback WHERE status='new'").fetchone()[0],
-            "reports_open": counts["content_reports"],
+            "reports_open": conn.execute("SELECT COUNT(*) FROM content_reports WHERE status='open'").fetchone()[0],
             "banned": conn.execute("SELECT COUNT(*) FROM users WHERE banned_at IS NOT NULL").fetchone()[0],
         }
     finally:
@@ -418,7 +432,9 @@ def overview(actor: str = Depends(actor_of)):
 
 @app.get("/api/feedback")
 def feedback_list(status: str = "", limit: int = 20, actor: str = Depends(actor_of)):
-    """运营页要能直接看到"有什么要处理"。只读、只出白名单列、正文截断。"""
+    """List customer-visible ticket states with a redacted preview of each ticket."""
+    if status not in ("", "new", "doing", "done", "wontfix"):
+        raise HTTPException(status_code=422, detail="反馈状态不合法")
     limit = max(1, min(int(limit or 20), 50))
     conn = db(readonly=True)
     try:
@@ -436,21 +452,162 @@ def feedback_list(status: str = "", limit: int = 20, actor: str = Depends(actor_
         conn.close()
 
 
+@app.get("/api/feedback/{feedback_id}")
+def feedback_detail(feedback_id: int, actor: str = Depends(actor_of)):
+    conn = db(readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT id,user_id,kind,status,body,page,app_build,contact,reply,created_at,replied_at "
+            "FROM feedback WHERE id=?", (feedback_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="反馈不存在")
+        item = dict(row)
+        item["username"] = (conn.execute("SELECT username FROM users WHERE id=?",
+                                         (item["user_id"],)).fetchone() or [None])[0] \
+            if item["user_id"] is not None else None
+        return item
+    finally:
+        conn.close()
+
+
+@app.patch("/api/feedback/{feedback_id}")
+def update_feedback(feedback_id: int, payload: dict, actor: str = Depends(actor_of)):
+    """Update a support ticket and keep the customer-facing feedback API in sync."""
+    statuses = {"new", "doing", "done", "wontfix"}
+    status = str(payload.get("status") or "")
+    expected = str(payload.get("expected_status") or "")
+    if status not in statuses or expected not in statuses:
+        raise HTTPException(status_code=422, detail="状态或原状态不合法")
+    if "reply" not in payload or not isinstance(payload.get("reply"), str):
+        raise HTTPException(status_code=422, detail="请填写处理回复")
+    reply = payload["reply"].strip()
+    if len(reply) > 800:
+        raise HTTPException(status_code=422, detail="回复最多 800 字")
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT id,user_id,kind,status,reply FROM feedback WHERE id=?",
+                           (feedback_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="反馈不存在")
+        if row["status"] != expected:
+            raise HTTPException(status_code=409, detail="反馈已被其他操作更新，请刷新后重试")
+        replied_at = now_iso() if reply else None
+        conn.execute("UPDATE feedback SET status=?,reply=?,replied_at=COALESCE(?,replied_at) WHERE id=?",
+                     (status, reply, replied_at, feedback_id))
+        audit_in(conn, actor, "update_feedback", "feedback", feedback_id,
+                 before={"status": row["status"], "reply_length": len(row["reply"] or "")},
+                 after={"status": status, "reply_length": len(reply)})
+        conn.commit()
+        return {"code": 0, "id": feedback_id, "status": status,
+                "reply": reply, "replied_at": replied_at}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @app.get("/api/reports")
-def reports_list(limit: int = 20, actor: str = Depends(actor_of)):
+def reports_list(status: str = "open", limit: int = 20, actor: str = Depends(actor_of)):
+    if status not in ("open", "actioned", "dismissed", "all"):
+        raise HTTPException(status_code=422, detail="举报状态不合法")
     limit = max(1, min(int(limit or 20), 50))
     conn = db(readonly=True)
     try:
-        # status/handled_* 是后台侧补的列，主应用的建表语句里没有（docs/02 A9 的 schema 漂移）。
-        # 所以按真实列裁剪，老库/新库都能读，不许假设它们一定存在。
         have = {r[1] for r in conn.execute("PRAGMA table_info(content_reports)")}
+        if not {"status", "handled_at", "handled_note"} <= have:
+            raise HTTPException(status_code=503, detail="主应用数据库尚未完成举报状态迁移")
         wanted = ["id", "target_kind", "target_id", "reporter", "reason", "created_at",
                   "status", "handled_at", "handled_note"]
-        picked = [c for c in wanted if c in have]
-        rows = conn.execute(
-            "SELECT %s FROM content_reports ORDER BY id DESC LIMIT ?" % ",".join(picked),
-            (limit,)).fetchall()
-        return {"items": [dict(r) for r in rows], "columns": picked}
+        where = "" if status == "all" else "WHERE status=?"
+        args = (limit,) if status == "all" else (status, limit)
+        rows = conn.execute("SELECT %s FROM content_reports %s ORDER BY id DESC LIMIT ?"
+                            % (",".join(wanted), where), args).fetchall()
+        counts = {str(r[0]): int(r[1]) for r in conn.execute(
+            "SELECT status,COUNT(*) FROM content_reports GROUP BY status").fetchall()}
+        items = []
+        for row in rows:
+            item = dict(row)
+            reporter = conn.execute("SELECT username,nickname FROM users WHERE id=?",
+                                    (item["reporter"],)).fetchone()
+            item["reporter_name"] = ((reporter["nickname"] or reporter["username"]) if reporter else "已注销用户")
+            target = None
+            if item["target_kind"] == "post":
+                target = conn.execute(
+                    "SELECT p.id,p.user_id,p.body,p.status,u.username,u.nickname "
+                    "FROM posts p LEFT JOIN users u ON u.id=p.user_id WHERE p.id=?",
+                    (item["target_id"],)).fetchone()
+            elif item["target_kind"] == "comment":
+                target = conn.execute(
+                    "SELECT c.id,c.post_id,c.user_id,c.body,c.status,u.username,u.nickname "
+                    "FROM comments c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=?",
+                    (item["target_id"],)).fetchone()
+            item["target"] = (dict(target) if target else None)
+            if item["target"]:
+                item["target"]["author"] = (item["target"].pop("nickname", None)
+                                               or item["target"].pop("username", None)
+                                               or "已注销用户")
+            items.append(item)
+        return {"items": items, "counts": counts, "status": status}
+    finally:
+        conn.close()
+
+
+@app.post("/api/reports/{report_id}/resolve")
+def resolve_report(report_id: int, payload: dict, actor: str = Depends(actor_of)):
+    action = str(payload.get("action") or "")
+    expected = str(payload.get("expected_status") or "")
+    note = str(payload.get("note") or "").strip()
+    if action not in ("dismiss", "remove") or expected != "open":
+        raise HTTPException(status_code=422, detail="处理动作或原状态不合法")
+    if len(note) < 2 or len(note) > 400:
+        raise HTTPException(status_code=422, detail="请填写 2–400 字的处理说明")
+    conn = db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        report = conn.execute("SELECT * FROM content_reports WHERE id=?", (report_id,)).fetchone()
+        if not report:
+            raise HTTPException(status_code=404, detail="举报不存在")
+        if report["status"] != expected:
+            raise HTTPException(status_code=409, detail="举报已被处理，请刷新队列")
+        target_kind, target_id = report["target_kind"], int(report["target_id"])
+        before_target = None
+        action_name = "dismiss_report"
+        final_status = "dismissed"
+        if action == "remove":
+            if target_kind == "post":
+                target = conn.execute("SELECT id,status FROM posts WHERE id=?", (target_id,)).fetchone()
+                if not target or target["status"] != "open":
+                    raise HTTPException(status_code=409, detail="帖子已不存在或已下架")
+                before_target = {"status": target["status"]}
+                conn.execute("UPDATE posts SET status='deleted' WHERE id=? AND status='open'", (target_id,))
+                action_name = "remove_reported_post"
+            elif target_kind == "comment":
+                target = conn.execute("SELECT id,post_id,status FROM comments WHERE id=?",
+                                      (target_id,)).fetchone()
+                if not target or target["status"] != "open":
+                    raise HTTPException(status_code=409, detail="评论已不存在或已删除")
+                before_target = {"status": target["status"]}
+                conn.execute("UPDATE comments SET status='deleted' WHERE id=? AND status='open'", (target_id,))
+                conn.execute("UPDATE posts SET comment_count=MAX(0,comment_count-1) WHERE id=?",
+                             (target["post_id"],))
+                action_name = "remove_reported_comment"
+            else:
+                raise HTTPException(status_code=422, detail="不支持的举报对象类型")
+            final_status = "actioned"
+        conn.execute("UPDATE content_reports SET status=?,handled_at=?,handled_note=? WHERE id=? AND status='open'",
+                     (final_status, now_iso(), note, report_id))
+        audit_in(conn, actor, action_name, target_kind, target_id,
+                 before={"report_status": "open", "target": before_target} if before_target else {"report_status": "open"},
+                 after={"report_status": final_status,
+                        "target_status": "deleted" if action == "remove" else None}, note=note)
+        conn.commit()
+        return {"code": 0, "id": report_id, "status": final_status,
+                "target_kind": target_kind, "target_id": target_id}
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

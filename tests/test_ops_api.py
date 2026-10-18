@@ -145,6 +145,83 @@ class OpsApi(unittest.TestCase):
         self.assertIn("测试举报理由", json.dumps(rp, ensure_ascii=False))
         self.assertNotIn("password_hash", json.dumps(rp, ensure_ascii=False))
 
+    def test_feedback_reply_and_report_moderation_round_trip(self):
+        """工单回复回到 App；举报处理软下架内容并在同一事务留下审计。"""
+        feedback = self.app.post("/api/feedback", headers=self.auth(),
+                                 json={"kind": "bug", "text": "私信页面顶部空白",
+                                       "page": "/community", "contact": ""})
+        self.assertEqual(feedback.status_code, 200, feedback.text)
+        fid = feedback.json()["id"]
+        detail = self.ops.get("/api/feedback/%d" % fid, headers=self.bearer).json()
+        self.assertEqual(detail["status"], "new")
+        saved = self.ops.patch("/api/feedback/%d" % fid, headers=self.bearer,
+                               json={"expected_status": "new", "status": "doing",
+                                     "reply": "已经修复，请更新应用后查看。"})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        visible = self.app.get("/api/feedback/mine", headers=self.auth()).json()["items"]
+        own_feedback = next(x for x in visible if x["id"] == fid)
+        self.assertEqual(own_feedback["status"], "doing")
+        self.assertEqual(own_feedback["reply"], "已经修复，请更新应用后查看。")
+        stale = self.ops.patch("/api/feedback/%d" % fid, headers=self.bearer,
+                               json={"expected_status": "new", "status": "done", "reply": "过期写入"})
+        self.assertEqual(stale.status_code, 409, "旧页面不应覆盖刚保存的工单")
+
+        post = self.app.post("/api/community/posts", headers=self.auth(),
+                             json={"text": "被举报测试帖子", "images": [],
+                                   "request_id": "ops-report-post"}).json()["post"]
+        other_headers = {"Authorization": "Bearer " + self.other["token"]}
+        submitted = self.app.post("/api/community/report", headers=other_headers,
+                                  json={"kind": "post", "target_id": post["id"], "reason": "测试广告"})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        queue = self.ops.get("/api/reports?status=open", headers=self.bearer).json()["items"]
+        report = next(x for x in queue if x["target_id"] == post["id"])
+        self.assertEqual(report["target"]["body"], "被举报测试帖子")
+        self.assertEqual(report["target"]["author"], "opsowner")
+        removed = self.ops.post("/api/reports/%d/resolve" % report["id"], headers=self.bearer,
+                                json={"action": "remove", "expected_status": "open", "note": "确认属于广告内容"})
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertEqual(self.sql("SELECT status FROM posts WHERE id=?", (post["id"],))[0]["status"], "deleted")
+        self.assertEqual(self.sql("SELECT status FROM content_reports WHERE id=?", (report["id"],))[0]["status"],
+                         "actioned")
+        self.assertEqual(self.ops.post("/api/reports/%d/resolve" % report["id"], headers=self.bearer,
+                                      json={"action": "remove", "expected_status": "open",
+                                            "note": "重复处理"}).status_code, 409)
+        self.assertTrue(self.audits("remove_reported_post"), "下架和审计没有一起提交")
+
+        second_post = self.app.post("/api/community/posts", headers=self.auth(),
+                                    json={"text": "评论举报测试", "images": [],
+                                          "request_id": "ops-report-comment"}).json()["post"]
+        comment = self.app.post("/api/community/posts/%d/comments" % second_post["id"],
+                                headers=other_headers,
+                                json={"text": "被举报评论", "request_id": "ops-report-comment-1"}).json()["comment"]
+        submitted = self.app.post("/api/community/report", headers=self.auth(),
+                                  json={"kind": "comment", "target_id": comment["id"], "reason": "测试辱骂"})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        report = next(x for x in self.ops.get("/api/reports?status=open", headers=self.bearer).json()["items"]
+                      if x["target_id"] == comment["id"])
+        result = self.ops.post("/api/reports/%d/resolve" % report["id"], headers=self.bearer,
+                               json={"action": "remove", "expected_status": "open", "note": "确认违反评论规范"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(self.sql("SELECT status FROM comments WHERE id=?", (comment["id"],))[0]["status"],
+                         "deleted")
+        self.assertEqual(self.sql("SELECT comment_count FROM posts WHERE id=?",
+                                  (second_post["id"],))[0]["comment_count"], 0)
+
+        # 驳回只更新队列状态，不碰帖子；记录仍可查询。
+        third_post = self.app.post("/api/community/posts", headers=self.auth(),
+                                   json={"text": "驳回举报测试", "images": [],
+                                         "request_id": "ops-report-dismiss"}).json()["post"]
+        self.app.post("/api/community/report", headers=other_headers,
+                      json={"kind": "post", "target_id": third_post["id"], "reason": "误报"})
+        report = next(x for x in self.ops.get("/api/reports?status=open", headers=self.bearer).json()["items"]
+                      if x["target_id"] == third_post["id"])
+        dismissed = self.ops.post("/api/reports/%d/resolve" % report["id"], headers=self.bearer,
+                                  json={"action": "dismiss", "expected_status": "open", "note": "复核后属于正常分享"})
+        self.assertEqual(dismissed.status_code, 200, dismissed.text)
+        self.assertEqual(self.sql("SELECT status FROM posts WHERE id=?", (third_post["id"],))[0]["status"], "open")
+        self.assertEqual(self.sql("SELECT status FROM content_reports WHERE id=?", (report["id"],))[0]["status"],
+                         "dismissed")
+
     def test_downstream_errors_are_not_masked_as_401(self):
         """中间件曾把下游的任何异常都吞掉并返回 401——排查时看起来像"口令错"，实际是接口炸了。
         这是本轮真实踩到的 bug，钉住：异常必须冒成 500。"""
@@ -206,8 +283,12 @@ class OpsApi(unittest.TestCase):
         for path in ("/api/health", "/api/overview", "/api/gate", "/api/audit",
                      "/api/users", "/api/users/%d" % self.signup["id"],
                      "/api/users/%d/export" % self.signup["id"],
-                     "/api/feedback", "/api/reports"):
+                     "/api/feedback", "/api/feedback/1", "/api/reports"):
             self.assertEqual(self.ops.get(path).status_code, 401, path + " 不该免登录")
+        self.assertEqual(self.ops.patch("/api/feedback/1", json={"status": "done",
+                         "expected_status": "new", "reply": "x"}).status_code, 401)
+        self.assertEqual(self.ops.post("/api/reports/1/resolve",
+                         json={"action": "dismiss", "expected_status": "open", "note": "x"}).status_code, 401)
         for path, body in (("/api/users/%d/ban" % self.signup["id"], {"reason": "x"}),
                            ("/api/gate", {"expect_current": 0, "new": 1}),
                            ("/api/backup", {})):
