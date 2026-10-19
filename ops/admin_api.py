@@ -788,6 +788,9 @@ def media_orphans(actor: str = Depends(actor_of)):
             # posts.images 存的是 /uploads/xxx.jpg 这种带路径的 URL，和文件名比对前必须取 basename
             for n in read_images(row[0]):
                 referenced.add(os.path.basename(n))
+        # 私聊里的图片/视频也是被引用的文件；漏掉会把聊天媒体全报成孤儿
+        for row in conn.execute("SELECT media_name FROM messages WHERE media_name IS NOT NULL AND media_name<>''"):
+            referenced.add(os.path.basename(row[0]))
     finally:
         conn.close()
     orphans = sorted(names - referenced)

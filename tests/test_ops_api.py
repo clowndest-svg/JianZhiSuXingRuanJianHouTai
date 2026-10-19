@@ -521,19 +521,24 @@ class OpsApi(unittest.TestCase):
     def test_orphan_media_counts_are_real_and_no_filenames_leak(self):
         up = self.root / "UPLOAD"
         (up / "keep-me.jpg").write_bytes(b"x" * 10)
+        (up / "dm-keep.webm").write_bytes(b"z" * 20)
         (up / "orphan-one.png").write_bytes(b"y" * 33)
         self.sql("INSERT INTO posts(user_id,body,images,created_at) VALUES (?,?,?,?)",
                  (self.signup["id"], "带图帖子", json.dumps(["/uploads/keep-me.jpg"]),
                   "2026-10-19 00:00:00"))
+        self.sql("INSERT INTO messages(conv_key,from_id,to_id,body,created_at,kind,media_name)"
+                 " VALUES (?,?,?,?,?,?,?)",
+                 ("1:2", self.signup["id"], self.other["id"], "", "2026-10-19 00:00:01",
+                  "video", "dm-keep.webm"))
         r = self.ops.get("/api/media/orphans", headers=self.bearer)
         self.assertEqual(r.status_code, 200, r.text)
         out = r.json()
-        self.assertEqual(out["files"], 2, "上传目录里的文件数不对")
-        self.assertEqual(out["referenced"], 1, "被帖子引用的文件没算进 referenced")
+        self.assertEqual(out["files"], 3, "上传目录里的文件数不对")
+        self.assertEqual(out["referenced"], 2, "被帖子/私聊引用的文件没算进 referenced")
         self.assertEqual(out["orphans"], 1, "孤儿数不对")
         self.assertEqual(out["orphan_bytes"], 33, "孤儿体积算错了")
         text = r.text
-        for name in ("keep-me.jpg", "orphan-one.png"):
+        for name in ("keep-me.jpg", "dm-keep.webm", "orphan-one.png"):
             self.assertNotIn(name, text, "文件名属于敏感列，不该回给前端：" + name)
         self.assertIn("只报告", out["note"], "没有说明这是只读报告，运营会以为点一下就删")
 
