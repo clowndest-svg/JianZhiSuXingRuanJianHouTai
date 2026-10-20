@@ -86,6 +86,9 @@ class OpsApi(unittest.TestCase):
             "OPS_INSECURE_COOKIE": "1",
             "OPS_BASIC_USER": "qingsu",
             "OPS_BASIC_PASSWORD": "dev-basic-pw",
+            "QINGSU_MAIL_CONFIG": str(root / 'mail.json'),
+            "QINGSU_MAIL_CHECK": str(root / 'mail-check.json'),
+            "QINGSU_MONITOR_FILE": str(root / 'monitor.json'),
         })
         self.ops_mod = load(BACKEND / "ops" / "admin_api.py", "qingsu_ops_api")
         self.ops = TestClient(self.ops_mod.app, headers={
@@ -124,6 +127,54 @@ class OpsApi(unittest.TestCase):
     def audits(self, action=None):
         rows = self.ops.get("/api/audit?limit=100", headers=self.bearer).json()["items"]
         return [a for a in rows if action is None or a["action"] == action]
+
+    def test_mail_config_does_not_return_or_audit_password(self):
+        body = dict(host='smtp.example.com', port=465, tls='ssl', user='tester@example.com', password='PRIVATE_SMTP_SECRET', enabled=True)
+        body['from'] = 'tester@example.com'
+        r = self.ops.post('/api/mail', json=body, headers=self.bearer)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn('PRIVATE_SMTP_SECRET', r.text)
+        self.assertNotIn('PRIVATE_SMTP_SECRET', self.ops.get('/api/mail', headers=self.bearer).text)
+        self.assertNotIn('PRIVATE_SMTP_SECRET', json.dumps(self.audits()))
+        saved = json.loads((self.root / 'mail.json').read_text())
+        self.assertEqual(saved['password'], 'PRIVATE_SMTP_SECRET')
+        r = self.ops.post('/api/mail', json=dict(body, password=''), headers=self.bearer)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(json.loads((self.root / 'mail.json').read_text())['password'], 'PRIVATE_SMTP_SECRET')
+        self.assertEqual(self.ops.post('/api/mail', json=dict(body, host='other.example.com', password=''), headers=self.bearer).status_code, 400)
+
+    def test_mail_check_is_truthful_and_sanitizes_provider_errors(self):
+        self.assertEqual(self.ops.post('/api/mail/check', headers=self.bearer).status_code, 400)
+        self.ops.post('/api/mail', headers=self.bearer, json={'host': 'smtp.example.com', 'port': 465, 'tls': 'ssl', 'user': 'test', 'from': 'test@example.com', 'password': 'PRIVATE_SECRET'})
+        def reject(raw):
+            raise RuntimeError('PRIVATE_SECRET provider diagnostics')
+        self.ops_mod._check_smtp = reject
+        r = self.ops.post('/api/mail/check', headers=self.bearer)
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()['ok'])
+        self.assertFalse(r.json()['delivery_tested'])
+        self.assertNotIn('PRIVATE_SECRET', r.text)
+        self.ops_mod._mail_check_at = 0
+        self.ops_mod._check_smtp = lambda raw: None
+        r = self.ops.post('/api/mail/check', headers=self.bearer)
+        self.assertTrue(r.json()['ok'])
+        self.assertFalse(r.json()['delivery_tested'])
+
+    def test_mail_configuration_requires_both_authentication_layers(self):
+        self.assertEqual(self.bare.get('/api/mail').status_code, 401)
+        self.assertEqual(self.ops.get('/api/mail').status_code, 401)
+        self.assertEqual(self.ops.post('/api/mail', headers=self.bearer, json={'enabled': False}).status_code, 200)
+        self.assertFalse(json.loads((self.root / 'mail.json').read_text())['enabled'])
+
+    def test_admin_writes_reject_cross_site_origin(self):
+        r = self.ops.post('/api/mail', headers={**self.bearer, 'Origin': 'https://evil.test'}, json={'enabled': False})
+        self.assertEqual(r.status_code, 403)
+
+    def test_sensitive_push_and_invite_fields_are_redacted_in_audit(self):
+        self.ops_mod.audit('test', 'test', 'push_subscriptions', 'fixture', before={'endpoint': 'PRIVATE_ENDPOINT', 'keys_json': 'PRIVATE_KEYS', 'session_hash': 'PRIVATE_SESSION', 'failures': 0})
+        text = json.dumps(self.audits('test'))
+        for marker in ('PRIVATE_ENDPOINT', 'PRIVATE_KEYS', 'PRIVATE_SESSION'):
+            self.assertNotIn(marker, text)
 
     # ---- 鉴权 ----
     def test_feedback_and_reports_lists_are_ready_to_work_from(self):

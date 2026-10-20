@@ -16,6 +16,11 @@ import hmac
 import json
 import logging
 import os
+import ipaddress
+import socket
+import smtplib
+import ssl
+import tempfile
 import secrets
 import shutil
 import sqlite3
@@ -41,6 +46,9 @@ CONSOLE_HTML = APP_DIR / "console.html"
 CONTAINER_NAME = os.environ.get("QINGSU_CONSOLE_CONTAINER", "qingsu-console")
 # 服务器上跑的是 python3；Windows 上 python3 是商店别名（会静默返回 49），本地测试用 sys.executable
 PYTHON_BIN = os.environ.get("QINGSU_PYTHON_BIN", "python3")
+MAIL_CONFIG = os.environ.get('QINGSU_MAIL_CONFIG', '/opt/qingsu/mail.json')
+MAIL_CHECK = os.environ.get('QINGSU_MAIL_CHECK', '/opt/qingsu/admin/mail-check.json')
+MONITOR_FILE = os.environ.get('QINGSU_MONITOR_FILE', '/opt/qingsu/monitor/status.json')
 SESSION_TTL = 8 * 3600
 LOGIN_MAX_ATTEMPTS = 8
 LOGIN_LOCK_SEC = 900
@@ -56,6 +64,8 @@ SENSITIVE = {
     ("profiles", "loc_lat"), ("profiles", "loc_lng"),
     ("ai_memory", "mem_value"), ("private_ai_answers", "answer"), ("kb_entries", "answer"),
     ("body_cycles", "photo_url"), ("media_uploads", "name"), ("posts", "images"),
+    ('push_subscriptions', 'endpoint'), ('push_subscriptions', 'keys_json'),
+    ('push_subscriptions', 'session_hash'), ('shared_goals', 'invite_hash'),
 }
 
 
@@ -279,6 +289,13 @@ async def basic_gate_middleware(request: Request, call_next):
     """L2：整台服务都在这道闸后面，没有例外（包括 /api/login）。
     口令没配好时宁可 503 拒绝服务，也不静默敞开——"忘了配 Basic"这种事
     最坏的形状是它一直开着而没人知道。"""
+    # Browser writes carrying cookies must originate from this same site.
+    origin = request.headers.get('origin')
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and origin:
+        from urllib.parse import urlsplit
+        parsed = urlsplit(origin)
+        if parsed.netloc != request.headers.get('host') or parsed.scheme not in ('https', 'http'):
+            return JSONResponse({'detail': '拒绝跨站后台操作'}, status_code=403)
     user, password = basic_gate()
     challenge = 'Basic realm="qingsu-ops", charset="UTF-8"'
     if not password:
@@ -714,7 +731,7 @@ def audit_list(limit: int = 40, actor: str = Depends(actor_of)):
             except json.JSONDecodeError:
                 payload = "非JSON(截断)"
             if isinstance(payload, dict):
-                r[key] = _redact_table(str(r.get("target_kind") or ""), payload)
+                payload = _redact_table(str(r.get("target_kind") or ""), payload)
             r[key] = payload
     return {"items": rows}
 
@@ -1084,6 +1101,171 @@ def backup(body: dict, actor: str = Depends(actor_of)):
     if check != "ok":
         raise HTTPException(status_code=500, detail="备份出来了但校验不是 ok：%s" % check)
     return {"code": 0, "snapshot": snapshot, "integrity": check, "new_files": len(fresh)}
+
+
+def _read_mail():
+    try:
+        raw = json.loads(Path(MAIL_CONFIG).read_text(encoding='utf-8'))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _mail_safe(raw):
+    return {k: raw.get(k, '') for k in ('host', 'port', 'user', 'from', 'tls')} | {
+        'enabled': raw.get('enabled', True), 'password_set': bool(raw.get('password')),
+        'configured': bool(all(raw.get(k) for k in ('host', 'user', 'password', 'from')))}
+
+
+def _write_private(path, value, app_read=False):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=target.name + '.', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.name == 'posix':
+            if app_read and os.geteuid() == 0:
+                import grp
+                os.chown(temp, 0, grp.getgrnam('qingsu').gr_gid)
+            os.chmod(temp, 0o640 if app_read else 0o600)
+        os.replace(temp, target)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+@app.get('/api/mail')
+def mail_status(actor: str = Depends(actor_of)):
+    raw = _read_mail()
+    check = None
+    try:
+        check = json.loads(Path(MAIL_CHECK).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        pass
+    live, error = json_get(APP_API + '/api/account/recovery-status')
+    return {'config': _mail_safe(raw), 'check': check, 'live': live or {'unreachable': error}}
+
+
+@app.post('/api/mail')
+def mail_save(body: dict, actor: str = Depends(actor_of)):
+    before = _read_mail()
+    enabled = body.get('enabled', True)
+    if not isinstance(enabled, bool):
+        raise HTTPException(400, '启用状态无效')
+    if not enabled:
+        after = dict(before, enabled=False)
+    else:
+        host = str(body.get('host', '')).strip().lower()
+        user = str(body.get('user', '')).strip()
+        sender = str(body.get('from', '')).strip()
+        mode = str(body.get('tls', 'ssl'))
+        try:
+            port = int(body.get('port', 465))
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'SMTP端口无效')
+        import re
+        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', host) or '.' not in host or host.endswith('.local'):
+            raise HTTPException(400, '请填写公开SMTP服务域名')
+        if mode not in ('ssl', 'starttls') or port not in (465, 587):
+            raise HTTPException(400, '仅支持465端口SSL或587端口STARTTLS')
+        if (mode == 'ssl') != (port == 465):
+            raise HTTPException(400, '端口与加密方式不匹配')
+        if not user or len(user) > 254 or any(ch in user + sender for ch in '\r\n') or not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+', sender):
+            raise HTTPException(400, '发信账号或发件邮箱无效')
+        password = body.get('password', '')
+        if not isinstance(password, str) or len(password) > 1024:
+            raise HTTPException(400, '授权码格式无效')
+        if not password and host == before.get('host') and user == before.get('user'):
+            password = before.get('password', '')
+        if not password:
+            raise HTTPException(400, '请填写SMTP密码或授权码')
+        after = dict(host=host, port=port, user=user, password=password, tls=mode, enabled=True)
+        after['from'] = sender
+    _write_private(MAIL_CONFIG, after, app_read=True)
+    Path(MAIL_CHECK).unlink(missing_ok=True)
+    audit(actor, 'mail_config', 'config', 'mail', before={'configured': bool(before)}, after={'enabled': enabled, 'configured': bool(after.get('password'))})
+    return {'code': 0, 'config': _mail_safe(after), 'note': '配置已保存；连接检查通过也不代表实际邮件已投递'}
+
+
+_mail_check_at = 0.0
+
+
+def _check_smtp(raw):
+    addresses = socket.getaddrinfo(raw['host'], raw['port'], type=socket.SOCK_STREAM)
+    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+        raise ValueError('SMTP service must use public addresses')
+    context = ssl.create_default_context()
+    if raw['tls'] == 'ssl':
+        smtp = smtplib.SMTP_SSL(raw['host'], raw['port'], timeout=8, context=context)
+    else:
+        smtp = smtplib.SMTP(raw['host'], raw['port'], timeout=8)
+    try:
+        if raw['tls'] == 'starttls':
+            smtp.starttls(context=context)
+        smtp.login(raw['user'], raw['password'])
+    finally:
+        smtp.quit()
+
+
+@app.post('/api/mail/check')
+def mail_check(actor: str = Depends(actor_of)):
+    global _mail_check_at
+    raw = _read_mail()
+    if not _mail_safe(raw)['configured'] or not raw.get('enabled', True):
+        raise HTTPException(400, '请先保存并启用发信配置')
+    if time.monotonic() - _mail_check_at < 30:
+        raise HTTPException(429, '请等30秒再检查')
+    _mail_check_at = time.monotonic()
+    result = {'checked_at': now_iso(), 'ok': False, 'delivery_tested': False}
+    try:
+        _check_smtp(raw)
+        result.update(ok=True, message='TLS连接及账号认证通过；尚未验证邮件投递')
+    except Exception as error:
+        result['message'] = '连接或认证失败（' + type(error).__name__ + '）'
+    _write_private(MAIL_CHECK, result)
+    audit(actor, 'mail_check', 'config', 'mail', after={'ok': result['ok']})
+    return result
+
+
+@app.get('/api/site-status')
+def site_status(actor: str = Depends(actor_of)):
+    base = 'https://scientificexploration.art'
+    ready, error = json_get(base + '/health/ready', timeout=4)
+    version, version_error = json_get(base + '/version.json', timeout=4)
+    certificates = []
+    for host in ('scientificexploration.art', '124.220.54.64'):
+        path = '/etc/letsencrypt/live/' + host + '/cert.pem'
+        try:
+            p = subprocess.run(['openssl', 'x509', '-noout', '-enddate', '-in', path], capture_output=True, text=True, timeout=3)
+            from email.utils import parsedate_to_datetime
+            left = round((parsedate_to_datetime(p.stdout.strip().split('=', 1)[1]).timestamp() - time.time()) / 3600, 1)
+            certificates.append({'host': host, 'hours_left': left})
+        except Exception:
+            certificates.append({'host': host, 'hours_left': None})
+    monitor = None
+    try:
+        raw = json.loads(Path(MONITOR_FILE).read_text())
+        monitor = {k: raw.get(k) for k in ('checked_at', 'ready', 'free_disk_mb', 'backup_age_hours', 'certificate_hours_left', 'errors_5xx', 'p95_ms', 'problems')}
+    except (OSError, ValueError):
+        pass
+    try:
+        timer = subprocess.run(['systemctl', 'is-active', 'qingsu-push.timer'], capture_output=True, text=True, timeout=3).stdout.strip()
+    except OSError:
+        timer = 'unknown'
+    c = db(readonly=True)
+    try:
+        try:
+            push_count = c.execute('SELECT COUNT(*) FROM push_subscriptions').fetchone()[0]
+        except sqlite3.Error:
+            push_count = None
+    finally:
+        c.close()
+    return {'base': base, 'https_ok': ready is not None, 'error': error, 'site_base': (ready or {}).get('site_base'),
+            'release': (ready or {}).get('release'), 'version': {k: (version or {}).get(k) for k in ('version_code', 'version_name', 'apk_url')},
+            'version_error': version_error, 'certificates': certificates, 'monitor': monitor,
+            'push': {'timer': timer, 'subscriptions': push_count}, 'checked_at': now_iso()}
 
 
 @app.get("/")

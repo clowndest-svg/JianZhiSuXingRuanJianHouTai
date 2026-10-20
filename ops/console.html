@@ -114,6 +114,8 @@
   <p class="note" id="hint" hidden>工单、举报、账号与发布运维都在这里处理；点赞、关注、喝水等汇总数字由服务端实时统计。</p>
   <nav id="nav" hidden>
     <button data-go="overview">概览</button>
+    <button data-go="site-status">域名与发布</button>
+    <button data-go="mail-settings">邮件接入</button>
     <button data-go="feedback-workspace">反馈工单</button>
     <button data-go="reports-workspace">举报审核</button>
     <button data-go="users">用户</button>
@@ -165,6 +167,28 @@
       <div id="report-list" class="queue"><div class="queue-empty">正在读取举报…</div></div>
       <article id="report-detail" class="detail"><div class="queue-empty">选择一条举报查看内容与处理记录。</div></article>
     </div>
+  </section>
+
+  <section id="site-status" hidden>
+    <h2>域名与发布状态</h2>
+    <div class="row"><button id="site-refresh">重新检查</button><a href="/about" target="_blank" rel="noopener">查看产品介绍</a><a href="/admin/" target="_blank" rel="noopener">数据控制台</a></div>
+    <p class="note">入口、证书、版本与监控分别检查；监控数据带采集时间，不能把历史读数当成当前状态。</p>
+    <p id="site-time" role="status"></p><div class="table-wrap" id="site-readings"></div>
+  </section>
+
+  <section id="mail-settings" hidden>
+    <h2>邮箱验证与密码找回</h2>
+    <p class="note">使用邮件服务商提供的SMTP账号和授权码。密码不会回显；留空仅在主机与账号都不变时保留原授权码。连接检查不发送邮件，也不代表邮件已投递。</p>
+    <p id="mail-live" role="status"></p>
+    <form id="mail-form" autocomplete="off">
+      <div class="row"><label><input id="mail-enabled" type="checkbox">启用邮件通道</label></div>
+      <div class="row"><label for="mail-host">SMTP域名</label><input id="mail-host" type="text" placeholder="smtp.example.com" maxlength="253"></div>
+      <div class="row"><label for="mail-tls">连接方式</label><select id="mail-tls"><option value="ssl">SSL · 465</option><option value="starttls">STARTTLS · 587</option></select></div>
+      <div class="row"><label for="mail-user">SMTP账号</label><input id="mail-user" type="text" maxlength="254"></div>
+      <div class="row"><label for="mail-from">发件邮箱</label><input id="mail-from" type="email" maxlength="254"></div>
+      <div class="row"><label for="mail-password">密码 / 授权码</label><input id="mail-password" type="password" maxlength="1024" autocomplete="new-password" placeholder="尚未设置"></div>
+      <div class="row"><button class="primary" type="submit">保存配置</button><button type="button" id="mail-check">检查TLS连接与账号认证</button><button type="button" id="mail-refresh">刷新状态</button></div>
+    </form><p id="mail-result" role="status"></p>
   </section>
 
   <section id="users" hidden>
@@ -276,18 +300,24 @@ $("dologin").onclick = async () => {
     toast("进来了");
   } catch (e) { toast(e.message, "bad"); }
 };
+function signedOut(){
+  document.querySelectorAll('main > section').forEach(s=>{s.hidden=s.id!=='login';});
+  $("nav").hidden=true;$("logout").hidden=true;$("hint").hidden=true;
+  $("who").textContent='未登录';$("token").value='';$("mail-password").value='';
+}
 $("logout").onclick = async () => {
   try { await api("/logout", { method: "POST", body: "{}" }); } catch (e) {}
-  $("login").hidden = false; $("nav").hidden = true; $("logout").hidden = true;
-  $("who").textContent = "未登录"; toast("已退出，本机不留令牌");
+  signedOut();toast("已退出，本机不留令牌");
 };
 
 /* ---------- 分页 ---------- */
 function show(name) {
-  ["overview", "feedback-workspace", "reports-workspace", "users", "gate", "backup", "audit"]
+  ["overview", "site-status", "mail-settings", "feedback-workspace", "reports-workspace", "users", "gate", "backup", "audit"]
     .forEach((s) => { $(s).hidden = s !== name; });
   document.querySelectorAll("#nav [data-go]").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
   if (name === "overview") refreshAll();
+  if (name === "site-status") refreshSite();
+  if (name === "mail-settings") refreshMail();
   if (name === "feedback-workspace") loadFeedback();
   if (name === "reports-workspace") loadReports();
   if (name === "users" && !$("utable").innerHTML.trim()) loadUsers();
@@ -707,6 +737,47 @@ function short(v) {
   const s = typeof v === "string" ? v : JSON.stringify(v);
   return s.length > 140 ? s.slice(0, 140) + "…" : s;
 }
+
+async function refreshSite(){
+  $("site-time").textContent="正在检查域名、证书和发布信息…";
+  try{
+    const d=await api('/site-status');
+    const v=d.version||{},m=d.monitor||{},p=d.push||{};
+    $("site-time").textContent='检查时间 '+d.checked_at;
+    $("site-readings").innerHTML='<table>'+row('正式入口',esc(d.base))+row('HTTPS就绪',tag(d.https_ok?'通过':'未通过：'+(d.error||'无响应'),d.https_ok?'ok':'bad'))
+      +row('应用生成链接使用',esc(d.site_base||'无读数'))+row('线上发布',esc(d.release||'无读数'))+row('安卓版本',esc(v.version_name||'无读数')+' / '+esc(v.version_code??'无读数'))+row('安装包入口',esc(v.apk_url||'无读数'))
+      +(d.certificates||[]).map(c=>row(c.host+' 证书剩余',c.hours_left==null?tag('无读数','bad'):tag(c.hours_left+' 小时',c.hours_left<48?'bad':'ok'))).join('')
+      +row('网页推送任务',tag(p.timer||'无读数',p.timer==='active'?'ok':'mid'))+row('浏览器订阅数',esc(p.subscriptions??'无读数'))
+      +row('监控采集时间',m.checked_at?esc(new Date(m.checked_at*1000).toLocaleString()):'无读数')
+      +row('备份距采集时间',m.backup_age_hours==null?'无读数':esc(m.backup_age_hours)+' 小时')
+      +row('采集时异常',m.problems?esc(m.problems.join('、')||'无'):'无读数')+'</table>';
+  }catch(e){$("site-time").textContent='检查失败：'+e.message;}
+}
+async function refreshMail(){
+  try{
+    const d=await api('/mail'),c=d.config||{};
+    $("mail-enabled").checked=c.configured&&c.enabled;
+    ['host','user','from'].forEach(k=>{$('mail-'+k).value=c[k]||'';});
+    $("mail-tls").value=c.tls==='starttls'?'starttls':'ssl';
+    $("mail-password").value='';$("mail-password").placeholder=c.password_set?'已保存；留空保留原值':'尚未设置';
+    $("mail-live").textContent=d.live?.mail==='up'?'主应用：已读取邮件配置，仍需验证真实投递':'主应用：'+(d.live?.mail_why||d.live?.unreachable||'尚未就绪');
+    $("mail-result").textContent=d.check?d.check.checked_at+' · '+d.check.message:'尚未进行连接检查';
+  }catch(e){$("mail-live").textContent='读取失败：'+e.message;}
+}
+$("site-refresh").onclick=refreshSite;$("mail-refresh").onclick=refreshMail;
+$("mail-form").onsubmit=async ev=>{
+  ev.preventDefault();const b=ev.submitter;b.disabled=true;
+  try{
+    const tls=$("mail-tls").value;
+    const body={enabled:$("mail-enabled").checked,host:$("mail-host").value.trim(),user:$("mail-user").value.trim(),from:$("mail-from").value.trim(),password:$("mail-password").value,tls,port:tls==='ssl'?465:587};
+    const d=await api('/mail',{method:'POST',body:JSON.stringify(body)});
+    $("mail-password").value='';await refreshMail();toast(d.note);
+  }catch(e){$("mail-result").textContent='未保存：'+e.message;}finally{b.disabled=false;}
+};
+$("mail-check").onclick=async()=>{
+  const b=$("mail-check");b.disabled=true;$("mail-result").textContent='正在检查TLS与账号认证，不发送邮件…';
+  try{const d=await api('/mail/check',{method:'POST',body:'{}'});$("mail-result").textContent=d.checked_at+' · '+d.message;}catch(e){$("mail-result").textContent='未完成检查：'+e.message;}finally{b.disabled=false;}
+};
 
 /* ---------- 起点 ---------- */
 whoami();
