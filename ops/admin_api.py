@@ -1113,7 +1113,7 @@ def _read_mail():
 
 def _mail_safe(raw):
     return {k: raw.get(k, '') for k in ('host', 'port', 'user', 'from', 'tls')} | {
-        'enabled': raw.get('enabled', True), 'password_set': bool(raw.get('password')),
+        'enabled': raw.get('enabled', bool(raw)), 'password_set': bool(raw.get('password')),
         'configured': bool(all(raw.get(k) for k in ('host', 'user', 'password', 'from')))}
 
 

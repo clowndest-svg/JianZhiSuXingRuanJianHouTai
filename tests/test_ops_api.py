@@ -163,6 +163,7 @@ class OpsApi(unittest.TestCase):
     def test_mail_configuration_requires_both_authentication_layers(self):
         self.assertEqual(self.bare.get('/api/mail').status_code, 401)
         self.assertEqual(self.ops.get('/api/mail').status_code, 401)
+        self.assertFalse(self.ops.get('/api/mail', headers=self.bearer).json()['config']['enabled'])
         self.assertEqual(self.ops.post('/api/mail', headers=self.bearer, json={'enabled': False}).status_code, 200)
         self.assertFalse(json.loads((self.root / 'mail.json').read_text())['enabled'])
 
