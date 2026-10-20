@@ -744,7 +744,8 @@ async function refreshSite(){
     const d=await api('/site-status');
     const v=d.version||{},m=d.monitor||{},p=d.push||{};
     $("site-time").textContent='检查时间 '+d.checked_at;
-    $("site-readings").innerHTML='<table>'+row('正式入口',esc(d.base))+row('HTTPS就绪',tag(d.https_ok?'通过':'未通过：'+(d.error||'无响应'),d.https_ok?'ok':'bad'))
+    $("site-readings").innerHTML='<table>'+row('当前有效入口',esc(d.base))+row('当前入口HTTPS',tag(d.https_ok?'通过':'未通过：'+(d.error||'无响应'),d.https_ok?'ok':'bad'))
+      +row('待接入域名',esc(d.planned_domain))+row('域名HTTPS',tag(d.domain_https_ok?'通过':'未就绪；请核对备案/接入与证书状态',d.domain_https_ok?'ok':'mid'))
       +row('应用生成链接使用',esc(d.site_base||'无读数'))+row('线上发布',esc(d.release||'无读数'))+row('安卓版本',esc(v.version_name||'无读数')+' / '+esc(v.version_code??'无读数'))+row('安装包入口',esc(v.apk_url||'无读数'))
       +(d.certificates||[]).map(c=>row(c.host+' 证书剩余',c.hours_left==null?tag('无读数','bad'):tag(c.hours_left+' 小时',c.hours_left<48?'bad':'ok'))).join('')
       +row('网页推送任务',tag(p.timer||'无读数',p.timer==='active'?'ok':'mid'))+row('浏览器订阅数',esc(p.subscriptions??'无读数'))

@@ -1231,9 +1231,13 @@ def mail_check(actor: str = Depends(actor_of)):
 
 @app.get('/api/site-status')
 def site_status(actor: str = Depends(actor_of)):
-    base = 'https://scientificexploration.art'
+    active, active_error = json_get(APP_API + '/health/ready', timeout=4)
+    base = (active or {}).get('site_base') or 'https://124.220.54.64'
+    if base not in ('https://124.220.54.64', 'https://scientificexploration.art'):
+        base = 'https://124.220.54.64'
     ready, error = json_get(base + '/health/ready', timeout=4)
     version, version_error = json_get(base + '/version.json', timeout=4)
+    domain_ready, domain_error = json_get('https://scientificexploration.art/health/ready', timeout=4) if base != 'https://scientificexploration.art' else (ready, error)
     certificates = []
     for host in ('scientificexploration.art', '124.220.54.64'):
         path = '/etc/letsencrypt/live/' + host + '/cert.pem'
@@ -1263,6 +1267,7 @@ def site_status(actor: str = Depends(actor_of)):
     finally:
         c.close()
     return {'base': base, 'https_ok': ready is not None, 'error': error, 'site_base': (ready or {}).get('site_base'),
+            'planned_domain': 'https://scientificexploration.art', 'domain_https_ok': domain_ready is not None, 'domain_error': domain_error,
             'release': (ready or {}).get('release'), 'version': {k: (version or {}).get(k) for k in ('version_code', 'version_name', 'apk_url')},
             'version_error': version_error, 'certificates': certificates, 'monitor': monitor,
             'push': {'timer': timer, 'subscriptions': push_count}, 'checked_at': now_iso()}

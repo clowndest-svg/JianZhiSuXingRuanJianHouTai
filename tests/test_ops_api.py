@@ -177,6 +177,20 @@ class OpsApi(unittest.TestCase):
         for marker in ('PRIVATE_ENDPOINT', 'PRIVATE_KEYS', 'PRIVATE_SESSION'):
             self.assertNotIn(marker, text)
 
+    def test_site_status_distinguishes_active_ip_and_pending_domain(self):
+        def fake(url, timeout=6):
+            if 'scientificexploration.art' in url:
+                return None, 'TLS unavailable'
+            if url.endswith('/version.json'):
+                return {'version_code': 45, 'version_name': '2.2.0', 'apk_url': 'https://124.220.54.64/qingsu.apk'}, None
+            return {'site_base': 'https://124.220.54.64', 'release': 'fixture', 'status': 'ok'}, None
+        self.ops_mod.json_get = fake
+        d = self.ops.get('/api/site-status', headers=self.bearer).json()
+        self.assertEqual(d['base'], 'https://124.220.54.64')
+        self.assertTrue(d['https_ok'])
+        self.assertFalse(d['domain_https_ok'])
+        self.assertEqual(d['version']['version_code'], 45)
+
     # ---- 鉴权 ----
     def test_feedback_and_reports_lists_are_ready_to_work_from(self):
         """运维页要能一眼看到"有什么要处理"，而不是只有计数。"""
