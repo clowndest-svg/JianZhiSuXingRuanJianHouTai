@@ -65,8 +65,12 @@ class OpsApi(unittest.TestCase):
         self.app = TestClient(self.app_mod.app)
         self.app_body = dict(username="opsowner", password="Review!123", age=30, height=170,
                              weight_jin=160, target_weight_jin=140)
-        self.signup = self.app.post("/api/register", json=self.app_body).json()
-        other = self.app.post("/api/register", json=dict(self.app_body, username="opsother")).json()
+        response = self.app.post("/api/register", json=self.app_body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.signup = response.json()
+        response = self.app.post("/api/register", json=dict(self.app_body, username="opsother"))
+        self.assertEqual(response.status_code, 200, response.text)
+        other = response.json()
         self.other = {"token": other["token"], "id": other["id"],
                       # sessions 的主键是 token_hash（没有 id 列），计数只能挑一个真实存在的列
                       "sessions": len(self.sql("SELECT token_hash FROM sessions WHERE user_id=?",
