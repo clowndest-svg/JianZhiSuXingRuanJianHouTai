@@ -4,7 +4,11 @@ name: qingsu-console
 # 所以这一层不做水平扩展、不加内存限制的"保险"也不做——先把资源说清楚。
 services:
   directus:
-    image: directus/directus:11          # 11.17.4，已在服务器本地（1.16GB）
+    # 钉到摘要，不跟浮动标签（方案 C04）：`:11` 会在某次 docker pull 时静默换成 11.x 的新补丁版，
+    # 于是"上周验过的后台"和"这周跑着的后台"不是同一份东西，而没人能回答是哪一版。
+    # 值来自 .env 的 DIRECTUS_IMAGE（形如 directus/directus:11@sha256:<64位>），
+    # bootstrap.sh 会核对它真的带了 @sha256:，没带就判红而不是照跑。
+    image: ${DIRECTUS_IMAGE:-directus/directus:11}
     container_name: qingsu-console
     restart: unless-stopped
     # K-1：用应用 uid(993) 跑会起不来（/directus 内部要写 .directus 与 uploads，pm2 要可写 HOME）。

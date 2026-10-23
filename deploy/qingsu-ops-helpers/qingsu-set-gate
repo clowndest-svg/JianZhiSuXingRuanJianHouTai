@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# 单独授权的理由：门值写错一位就把现役客户端全挡在门外，但为这一个数字给服务账号整个 data 目录的写权是更大的事故面。
+set -euo pipefail
+
+GATE_FILE=/opt/qingsu/data/min_build
+GATE_GROUP=qingsu
+
+# 1~6 位纯数字：空串、空格、分号、路径、命令替换统统进不来
+valid_gate_arguments() { [ "$#" -eq 1 ] && [[ "$1" =~ ^[0-9]{1,6}$ ]]; }
+
+write_gate_value() {
+  local value="$1" directory tmp
+  directory="${GATE_FILE%/*}"
+  # 落点只来自上面这个常量；临时文件必须与门文件同目录，mv 才是原子替换而不是先删后写
+  if [ -L "$GATE_FILE" ]; then
+    echo "门文件是符号链接，拒绝写入：$GATE_FILE" >&2
+    return 1
+  fi
+  tmp="$directory/.min_build.$$.tmp"
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    echo "临时文件已存在，拒绝覆盖：$tmp" >&2
+    return 1
+  fi
+  umask 077
+  printf '%s\n' "$value" | cat > "$tmp"
+  # 主应用（uid qingsu）要能读门值，所以固定成 root:qingsu 0644，不跟调用者的 umask 走
+  chmod 0644 "$tmp"
+  if getent group "$GATE_GROUP" >/dev/null 2>&1; then chown "root:$GATE_GROUP" "$tmp"; fi
+  mv -f "$tmp" "$GATE_FILE"
+}
+
+run_as_command() {
+  if ! valid_gate_arguments "$@"; then
+    echo "用法：qingsu-set-gate <1~6 位纯数字>（只写 $GATE_FILE，不接受路径参数）" >&2
+    exit 2
+  fi
+  write_gate_value "$1"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then run_as_command "$@"; fi

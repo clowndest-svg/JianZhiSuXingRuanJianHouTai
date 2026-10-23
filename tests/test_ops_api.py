@@ -6,14 +6,19 @@
 注意两个 Windows 坑：server.py 在 import 时就读环境变量并建目录，
 所以必须"先设 env 再 import"，而且每个用例都重新 import 一份。
 """
+import gc
+import hashlib
 import importlib.util
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -38,6 +43,40 @@ def load(path, name):
     return mod
 
 
+def _safe_unlink(path: str) -> None:
+    """Windows 上被别的连接锁着的临时库：重试几次，仍然删不掉就留着说一声。
+
+    判据跑完不能把 .tmp 变成垃圾场——但也不该为了"删干净"把一条真判据判成失败。
+    """
+    for _ in range(20):
+        try:
+            if not os.path.exists(path):
+                return
+            os.unlink(path)
+            return
+        except OSError:
+            time.sleep(0.25)
+    print("遗留临时文件删不掉：%s" % path)
+
+
+def write_fake_release(root: Path, code: int) -> Path:
+    """造一个"形状正确"的假发布物：清单说的构建号、包大小、SHA-256、
+    包内 app.js 自报的 APP_BUILD 四者互相对得上。
+
+    抬门那道核验查的就是这四点，夹具要是只写 version.json，
+    测出来的"能抬门"其实是绕过了核验。
+    """
+    apk = root / "WEB" / "qingsu.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/app.js", "const APP_BUILD = %d;\n" % code)
+    blob = apk.read_bytes()
+    (root / "WEB" / "version.json").write_text(
+        json.dumps({"version_code": code, "min_version_code": code,
+                    "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}),
+        encoding="utf-8")
+    return apk
+
+
 class OpsApi(unittest.TestCase):
     def setUp(self):
         (BACKEND / ".tmp").mkdir(exist_ok=True)
@@ -54,8 +93,7 @@ class OpsApi(unittest.TestCase):
         })
         self.db = root / "DATA" / "qingsu.db"
         (root / "DATA" / "min_build").write_text("0", encoding="utf-8")
-        (root / "WEB" / "version.json").write_text(
-            json.dumps({"version_code": 34, "min_version_code": 34}), encoding="utf-8")
+        write_fake_release(root, 34)
 
         # env 就位之后才 import 主应用：它在 import 期就建目录、跑 migrate_db
         self.app_mod = load(APP_REPO / "server.py", "qingsu_app_for_ops")
@@ -337,7 +375,7 @@ class OpsApi(unittest.TestCase):
         self.assertEqual(r.status_code, 401, "错的 Basic 口令放进来了")
         self.assertIn("basic", str(r.headers.get("www-authenticate", "")).lower(),
                       "401 没带挑战头，浏览器不会弹口令框")
-        self.assertEqual(self.ops.get("/api/whoami", headers=self.bearer).json()["actor"], "script")
+        self.assertEqual(self.ops.get("/api/whoami", headers=self.bearer).json()["actor"], "script:console")
 
     def test_missing_basic_password_refuses_service_instead_of_opening_it(self):
         # "忘了配 Basic" 最坏的形状是它一直开着而没人知道，所以缺口令必须拒绝服务
@@ -380,14 +418,19 @@ class OpsApi(unittest.TestCase):
         self.assertEqual(self.ops.get("/api/whoami").json()["actor"], "console")
         self.ops.post("/api/logout", headers=self.bearer)
         self.assertEqual(self.ops.get("/api/whoami").status_code, 401)
-        self.assertEqual(self.ops.get("/api/whoami", headers=self.bearer).json()["actor"], "script")
+        self.assertEqual(self.ops.get("/api/whoami", headers=self.bearer).json()["actor"], "script:console")
 
-    def test_tampered_cookie_is_refused(self):
+    def test_unregistered_cookie_is_refused(self):
+        """会话改成服务端登记制之后，"伪造签名"这条路已经不存在了；
+        现在要钉住的是：没登记过的号一律不认，且会话号是高熵随机值（不能从已知号推）。"""
         self.authed()
-        forged = self.ops_mod.make_session("console").rsplit(".", 1)[0] + "." + "0" * 32
-        self.ops.cookies.clear()
-        self.ops.cookies.set("qops", forged)
-        self.assertEqual(self.ops.get("/api/whoami").status_code, 401, "签名没校验住伪造的会话")
+        live = self.ops.cookies.get("qops")
+        self.assertEqual(len(live), len(secrets.token_urlsafe(32)))
+        self.ops.cookies.set("qops", secrets.token_urlsafe(32))
+        self.assertEqual(self.ops.get("/api/whoami").status_code, 401,
+                         "没登记过的会话号被当成了有效登录")
+        self.ops.cookies.set("qops", live[:8])
+        self.assertEqual(self.ops.get("/api/whoami").status_code, 401, "会话号被前缀匹配放过了")
 
     # ---- 封号：跨进程自证 ----
     def test_ban_needs_reason_and_exact_username(self):
@@ -750,6 +793,89 @@ class SeedContract(unittest.TestCase):
         src = (BACKEND / "directus" / "seed_policies.py").read_text(encoding="utf-8")
         # 播种脚本运行时自己会校验（缺字段直接 SystemExit）；这里钉住那段校验没被删掉
         self.assertIn("sorted(missing)", src)
+
+    def test_daily_policy_ends_up_read_only(self):
+        """方案 C02：日常运营账号在 Directus 里只许读，业务写统一走有审计的运维 API。
+
+        这条真的跑一遍播种、查真落库的权限行——只看 `WRITES = {}` 那行字证明不了
+        播种循环没有别的地方偷偷 INSERT 出 write/delete 动作。
+        """
+        handle = tempfile.NamedTemporaryFile(suffix='.db', delete=False, dir=str(BACKEND / ".tmp"))
+        handle.close()
+        seed_path = BACKEND / "directus" / "seed_policies.py"
+        saved_db = os.environ.get("QINGSU_DB")
+        os.environ["QINGSU_DB"] = handle.name
+        spec = importlib.util.spec_from_file_location("seed_policies_live", seed_path)
+        seed = importlib.util.module_from_spec(spec)
+        connections = []
+
+        def open_db():
+            db = sqlite3.connect(handle.name)
+            db.row_factory = sqlite3.Row
+            connections.append(db)
+            return db
+
+        try:
+            spec.loader.exec_module(seed)
+            self.assertEqual(dict(seed.WRITES), {},
+                             '给日常策略开了业务写：帖子状态、评论删除会绕过运维 API 的计数与审计')
+            conn = open_db()
+            conn.executescript("""
+                CREATE TABLE directus_collections (collection TEXT PRIMARY KEY, note TEXT,
+                    icon TEXT, hidden INTEGER DEFAULT 0, singleton INTEGER DEFAULT 0,
+                    archive_app_filter INTEGER DEFAULT 0, accountability TEXT);
+                CREATE TABLE directus_fields (collection TEXT, field TEXT, note TEXT,
+                    hidden INTEGER DEFAULT 0);
+                CREATE TABLE directus_roles (id TEXT PRIMARY KEY, name TEXT, icon TEXT,
+                    description TEXT, parent TEXT);
+                CREATE TABLE directus_policies (id TEXT PRIMARY KEY, name TEXT, icon TEXT,
+                    description TEXT, enforce_tfa INTEGER, admin_access INTEGER,
+                    app_access INTEGER);
+                CREATE TABLE directus_access (id TEXT PRIMARY KEY, role TEXT, policy TEXT);
+                CREATE TABLE directus_permissions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    collection TEXT, action TEXT, policy TEXT, permissions TEXT, fields TEXT);
+                CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, nickname TEXT,
+                    created_at TEXT, banned_at TEXT, ban_reason TEXT, public_id TEXT);
+                CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                    status TEXT, like_count INTEGER DEFAULT 0, comment_count INTEGER DEFAULT 0,
+                    created_at TEXT, images TEXT, title TEXT, region TEXT, edited_at TEXT,
+                    request_id TEXT);
+                CREATE TABLE content_reports (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_kind TEXT, target_id INTEGER, reporter INTEGER, reason TEXT,
+                    created_at TEXT);
+            """)
+            conn.commit()
+            self.assertEqual(seed.main(), 0, "播种没跑成，后面的断言都是空的")
+            check = open_db()
+            rows = check.execute("SELECT collection, action, fields FROM directus_permissions").fetchall()
+            self.assertTrue(rows, "一条权限都没播出来，后台会是空的")
+            non_read = sorted({(r["collection"], r["action"]) for r in rows if r["action"] != "read"})
+            self.assertEqual(non_read, [],
+                             "日常策略拿到了非读动作，业务写就能绕开运维 API 的审计：%s" % non_read)
+            # 私信正文与会话摘要不许出现在读白名单里（A03/A04 在 Directus 侧的同一口径）
+            for row in rows:
+                fields = set((row["fields"] or "").split(",")) - {""}
+                self.assertNotIn("last_body", fields, "会话摘要被放开了")
+                if row["collection"] == "messages":
+                    self.assertNotIn("body", fields, "私信正文进了日常读白名单")
+        finally:
+            for db in connections:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+            gc.collect()
+            os.environ.pop("QINGSU_DB", None)
+            if saved_db is not None:
+                os.environ["QINGSU_DB"] = saved_db
+            # 播种脚本自己那条连接不关（Windows 上文件会一直锁着）：删不掉就交给 addCleanup，
+            # 但要把"没删干净"说出来，别让它长成 .tmp 目录里没人认领的一堆库。
+            try:
+                if os.path.exists(handle.name):
+                    os.unlink(handle.name)
+            except OSError as error:
+                print("临时播种库没删掉，已登记清理：%s（%s）" % (handle.name, type(error).__name__))
+                self.addCleanup(_safe_unlink, handle.name)
 
 
 if __name__ == "__main__":

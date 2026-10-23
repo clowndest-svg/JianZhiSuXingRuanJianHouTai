@@ -64,16 +64,31 @@ PY
 chmod 600 "$ADMIN/console.json"
 
 # compose 只吃 env 文件，所以从 json 现生成一份（每次重生成，保证和 json 一致）
+# DIRECTUS_IMAGE 带 @sha256 摘要才允许起容器（方案 C04）：浮动 :11 会在某次 pull 时
+# 静默换成新的补丁版，于是"上周验过的后台"和"这周跑着的后台"不是同一份东西。
 python3 - "$ADMIN/console.json" "$ADMIN/directus.env" <<'PY'
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
+pinned = os.environ.get("DIRECTUS_IMAGE_PIN", "")
 lines = ["DIRECTUS_KEY=%s" % d["directus_key"], "DIRECTUS_SECRET=%s" % d["directus_secret"],
          "DIRECTUS_ADMIN_EMAIL=%s" % d["super_admin_email"],
          "DIRECTUS_ADMIN_PASSWORD=%s" % d["super_admin_password"]]
+if pinned:
+    lines.append("DIRECTUS_IMAGE=%s" % pinned)
 open(sys.argv[2], "w").write("\n".join(lines) + "\n")
 PY
 chmod 600 "$ADMIN/directus.env"
 good "directus.env 已从 console.json 生成（600 root）"
+
+if [ -z "${DIRECTUS_IMAGE_PIN:-}" ] || [ "${DIRECTUS_IMAGE_PIN#*@sha256:}" = "${DIRECTUS_IMAGE_PIN:-}" ]; then
+  bad "DIRECTUS_IMAGE_PIN 没设或不含 @sha256: 摘要 —— 现在起的是浮动标签，答不出线上是哪一版"
+  echo "   取摘要：docker inspect --format '{{index .RepoDigests 0}}' directus/directus:11"
+  echo "   再把它原样写进 $ADMIN/../directus.pin（本脚本从这里读）"
+elif [ ! -s "$ADMIN/directus.env" ]; then
+  bad "directus.env 没生成，compose 会因缺 KEY/SECRET 起不来"
+else
+  good "Directus 镜像已钉到摘要：${DIRECTUS_IMAGE_PIN%%@*} @sha256:$(printf %s "${DIRECTUS_IMAGE_PIN#*@sha256:}" | cut -c1-12)…"
+fi
 
 echo "== 2. 数据目录权限（C-2b：第二个写入者要能建 -wal）"
 echo "   改前：$(stat -c '%a %U:%G' "$DATA_DIR") / $(stat -c '%a %U:%G' "$DB")"

@@ -1,0 +1,8 @@
+# qingsu-ops 服务账号能请以 root 跑的，只有下面这三个绝对路径的 helper。
+# 不给 ALL、不给 docker 组：命令表里列不出"任意命令"，也就没有把降权还原成 root 的口子。
+# 参数形状由 helper 自己判死（纯数字 / 容器名白名单 / 无参数），这里的 sudoers 只多挡一层明显越界。
+qingsu-ops ALL=(root) NOPASSWD: \
+    /usr/local/sbin/qingsu-backup "", \
+    /usr/local/sbin/qingsu-set-gate [0-9]*, \
+    /usr/local/sbin/qingsu-container-health qingsu-console, \
+    /usr/local/sbin/qingsu-container-health qingsu-tls

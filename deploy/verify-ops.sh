@@ -24,7 +24,33 @@ else
   bad "UMask 不是 0002：$(systemctl show qingsu-ops -p UMask --value)"
 fi
 
-echo "== 2. 只绑桥地址"
+echo "== 1b. 服务账号与三个最小权限 helper（C01 的前置装配，重跑幂等）"
+if ! id qingsu-ops >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin qingsu-ops && say 账号 "已建 qingsu-ops" || bad "qingsu-ops 建不出来"
+fi
+id -nG qingsu-ops 2>/dev/null | tr ' ' '\n' | grep -qx qingsu || usermod -aG qingsu qingsu-ops
+for helper in qingsu-backup qingsu-set-gate qingsu-container-health; do
+  if install -o root -g root -m 0755 "$BASE/qingsu-ops-helpers/$helper" "/usr/local/sbin/$helper"; then
+    good "$helper 已装到 /usr/local/sbin（root:755）"
+  else
+    bad "$helper 装不上：$BASE/qingsu-ops-helpers/$helper"
+  fi
+done
+install -o root -g root -m 0440 "$BASE/qingsu-ops-sudoers" /etc/sudoers.d/qingsu-ops
+if visudo -c -f /etc/sudoers.d/qingsu-ops >/dev/null 2>&1; then
+  good "sudoers 语法通过"
+else
+  bad "sudoers 语法不过，已撤掉以免把整台 sudo 带坏"
+  rm -f /etc/sudoers.d/qingsu-ops
+fi
+# 原来靠 root 读的密钥文件，改成 root:qingsu-ops 0640：既不用把服务升回 root，也不对其他账号敞开
+[ -f "$ADMIN/console.json" ] && chgrp qingsu-ops "$ADMIN/console.json" && chmod 640 "$ADMIN/console.json" && good "console.json → root:qingsu-ops 640"
+[ -f "$ADMIN/mail-check.json" ] && chgrp qingsu-ops "$ADMIN/mail-check.json" && chmod 640 "$ADMIN/mail-check.json"
+[ -e /opt/qingsu/mail.json ] || touch /opt/qingsu/mail.json
+chown qingsu-ops:qingsu /opt/qingsu/mail.json && chmod 640 /opt/qingsu/mail.json && good "mail.json 归服务账号可写（640）"
+systemctl restart qingsu-ops
+sleep 2
+
 ss -ltn | grep -q '172.17.0.1:8100' && good "8100 监听在 docker 桥地址（nginx 那个容器够得到）" || bad "8100 没在桥地址上监听"
 ss -ltnp | grep ':8100' | grep -Eq '0.0.0.0:8100|\*:8100|124.220.54.64:8100' && bad "8100 暴露到公网了" || good "8100 没有对外监听"
 code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --connect-timeout 3 http://124.220.54.64:8100/api/overview 2>/dev/null || echo 连不上)
@@ -194,7 +220,63 @@ done
 good "审计里没有凭据列"
 if [ -n "$OTP" ] && printf '%s' "$A" | grep -q "$OTP"; then bad "一次性口令落进审计了"; else good "一次性口令没落审计"; fi
 
-echo "== 9. 收尾"
+echo "== 9. C01 降权与最小权限 helper"
+# 这一段只在生产上判得准：看的是实际跑起来的进程身份与 sudoers 生效结果，不是仓库里的文本。
+as_ops_root() { sudo -n -u qingsu-ops sudo -n "$@"; }   # 复刻服务进程的真实路径：服务账号 → sudoers → root helper
+SVC_PID=$(systemctl show qingsu-ops -p ExecMainPID --value)
+SVC_UID=$( [ -n "$SVC_PID" ] && stat -c '%u' "/proc/$SVC_PID" 2>/dev/null || echo '' )
+if [ -n "$SVC_UID" ] && [ "$SVC_UID" != "0" ]; then good "服务进程 uid=$SVC_UID（不是 root）"; else bad "服务进程还是 root 或取不到 pid（uid='${SVC_UID:-空}'）"; fi
+if [ "$(systemctl show qingsu-ops -p UMask --value)" = "0002" ]; then
+  good "降权后 UMask 仍是 0002（-wal/-shm 要靠它和 2770 setgid 一起组内可写）"
+else
+  bad "UMask 不是 0002：$(systemctl show qingsu-ops -p UMask --value)"
+fi
+if [ "$(systemctl show qingsu-ops -p User --value)" = "qingsu-ops" ]; then good "unit 的 User=qingsu-ops"; else bad "unit 的 User 不是 qingsu-ops：$(systemctl show qingsu-ops -p User --value)"; fi
+for helper in qingsu-backup qingsu-set-gate qingsu-container-health; do
+  if [ -x "/usr/local/sbin/$helper" ] && [ "$(stat -c '%U %a' "/usr/local/sbin/$helper")" = "root 755" ]; then
+    good "$helper 已就位（root:755，服务账号改不动它）"
+  else
+    bad "$helper 没装好或权限不是 root:755：$(stat -c '%U:%G %a' "/usr/local/sbin/$helper" 2>/dev/null || echo 不存在)"
+  fi
+done
+if id qingsu-ops >/dev/null 2>&1; then
+  if id -nG qingsu-ops | tr ' ' '\n' | grep -qx docker; then bad "qingsu-ops 在 docker 组里——那不是降权，是换个名字的 root"; else good "qingsu-ops 不在 docker 组"; fi
+  if sudo -ln -U qingsu-ops 2>/dev/null | grep -Eq 'ALL=\(ALL|/usr/local/sbin/[a-z-]+ +ALL'; then bad "sudoers 给了通配命令"; else good "sudoers 只列出三个 helper 的绝对路径"; fi
+else
+  bad "服务账号 qingsu-ops 还没建（生产执行步骤没做，这段判据不算通过）"
+fi
+if as_ops_root /usr/local/sbin/qingsu-container-health qingsu-console >/dev/null 2>&1; then good "合法容器名经 helper 查得到健康"; else bad "合法容器名被拒或 docker 不可用"; fi
+for bad_name in 'qingsu-console;rm -rf /' '../../etc/passwd' 'qingsu-console-x' ''; do
+  if as_ops_root /usr/local/sbin/qingsu-container-health "$bad_name" >/dev/null 2>&1; then bad "非法容器名被接受：[$bad_name]"; else good "非法容器名被拒：[$bad_name]"; fi
+done
+GATE_NOW=$(cat /opt/qingsu/data/min_build 2>/dev/null || echo 0)
+if as_ops_root /usr/local/sbin/qingsu-set-gate "$GATE_NOW" >/dev/null 2>&1 && [ "$(cat /opt/qingsu/data/min_build 2>/dev/null)" = "$GATE_NOW" ]; then
+  good "门值原样写回成功（值=$GATE_NOW，mtime 变化属正常，值没变）"
+else
+  bad "qingsu-set-gate 写不回原值，改门这条路已经断了"
+fi
+for bad_gate in '4;rm -rf /' '../../etc/passwd' '1234567' '' '-1'; do
+  if as_ops_root /usr/local/sbin/qingsu-set-gate "$bad_gate" >/dev/null 2>&1; then bad "非法门值被接受：[$bad_gate]"; else good "非法门值被拒：[$bad_gate]"; fi
+done
+if as_ops_root /usr/local/sbin/qingsu-set-gate "$GATE_NOW" /etc/passwd >/dev/null 2>&1; then bad "set-gate 竟然接受第二个路径参数"; else good "set-gate 拒绝路径参数"; fi
+if as_ops_root /usr/local/sbin/qingsu-backup >/dev/null 2>&1; then good "backup helper 无参数可跑（与 §8 同一个动作，由 root 落盘）"; else bad "backup helper 跑不起来"; fi
+for extra in '--help' ';rm -rf /'; do
+  if as_ops_root /usr/local/sbin/qingsu-backup "$extra" >/dev/null 2>&1; then bad "backup 接受了参数：[$extra]"; else good "backup 拒绝参数：[$extra]"; fi
+done
+if [ -e /opt/qingsu/data/qingsu.db-wal ]; then
+  WAL_MODE=$(stat -c '%a' /opt/qingsu/data/qingsu.db-wal); WAL_GROUP=$(stat -c '%G' /opt/qingsu/data/qingsu.db-wal)
+  if [ "$WAL_GROUP" = "qingsu" ] && [ "${WAL_MODE: -1}" = "0" ] && [ "${WAL_MODE:1:1}" != "0" ]; then
+    good "写库之后 -wal 仍是 group=qingsu 且组内可写（$WAL_MODE $WAL_GROUP）"
+  else
+    bad "降权后 -wal 归属不对：$WAL_MODE $WAL_GROUP（主应用会写不进去）"
+  fi
+else
+  say 提示 "此刻没有 -wal 文件（干净关闭属正常），归属判据以 §6 为准"
+fi
+if sudo -n -u qingsu-ops ls /opt/qingsu/backups >/dev/null 2>&1; then good "服务账号能列备份目录"; else say 提示 "服务账号读不到 root:700 的 /opt/qingsu/backups：后台的备份列表会空，需要单独给只读组位或让列表也走 helper"; fi
+say 提示 "NoNewPrivileges 仍关着：它和经 sudo 调 helper 互斥，要打开得先换成 socket 激活的 root helper（见 unit 注释）"
+
+echo "== 10. 收尾"
 say 用户数 "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM users')（应为 2）"
 [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM users')" = "2" ] && good "只剩两个真实账号" || bad "账号数不对"
 sqlite3 "$DB" "PRAGMA integrity_check" | sed 's/^/   integrity: /'

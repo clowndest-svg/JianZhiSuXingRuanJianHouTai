@@ -6,14 +6,25 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# 以 root 跑的理由：要写 /opt/qingsu/backups（root:700）、要读 root:600 的 console.json、
-# 要改 data/min_build 这个门文件。代价是它建的 -wal/-shm 默认会是 root:root 0644，
-# 主应用（uid qingsu）就拿不到写位——那会直接演成"后台点了一下，全站变只读"。
-# 数据目录已经是 2770 setgid（新文件继承 group=qingsu），再配 UMask=0002 就是
-# root:qingsu 0660，两边都能写。这两行是一套，删一行就是把 F-1 放出来。
-User=root
+# 不再以 root 跑：备份、改强更门、查容器健康这三件需要 root 的动作，改成 sudo 调
+# /usr/local/sbin/qingsu-{backup,set-gate,container-health} 三个 helper（见 qingsu-ops-sudoers），
+# 每个 helper 自己把参数判死：backup 不收参数、set-gate 只收 1~6 位纯数字且只写死那一个路径、
+# container-health 只认白名单里的两个容器名。服务账号不进 docker 组——那是把 root 换个名字叫降权。
+#
+# 换账号的前置条件（verify-ops.sh 会核对，缺一项就是"降权把后台降坏了"）：
+#   /opt/qingsu/admin/console.json 与 mail-check.json → root:qingsu-ops 0640
+#   /opt/qingsu/mail.json → qingsu-ops 可写
+#   /opt/qingsu/backups 仍是 root:700 时，后台的"备份列表"读会空；要么给只读组位，要么让 admin_api 也走 helper。
+#
+# UMask=0002 还是得留着，而且和 data 目录的 2770 setgid 是一套：这个账号写业务库，
+# 建出来的 -wal/-shm 必须是 group=qingsu 且组内可写，否则主应用（uid qingsu）拿不到写位，
+# 现场就是"后台点了一下，全站变只读"。删一行等于把 F-1 放出来。
+User=qingsu-ops
+Group=qingsu
 UMask=0002
 WorkingDirectory=/opt/qingsu/admin-console/ops
+# ProtectSystem=strict 之后站点目录只读，别让它把 __pycache__ 的写入失败当成故障
+Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=QINGSU_DB=/opt/qingsu/data/qingsu.db
 Environment=QINGSU_ADMIN_SECRETS=/opt/qingsu/admin/console.json
@@ -30,6 +41,14 @@ ExecStart=/usr/local/bin/uvicorn admin_api:app --host 172.17.0.1 --port 8100 --n
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=30
+# 沙箱收紧：根文件系统只读，只有下面这三处确实要写；/tmp 各进程私有，别人家的临时文件看不见。
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/opt/qingsu/data /opt/qingsu/admin /opt/qingsu/mail.json
+# NoNewPrivileges=yes 先不进这个 unit：它和"经 sudo 调 helper"是互斥的——NNP 一开，
+# setuid 的 sudo 直接报 no new privileges，备份/改门/健康查询三件全部失效。
+# 要真正打开 NNP，得把这三个动作换成 socket 激活的 root helper（服务只连本地套接字，不碰 setuid），
+# 那需要同时改 admin_api.py 与新增 .socket/.service，属于生产执行前的待办，不是这里能自证的。
 
 [Install]
 WantedBy=multi-user.target

@@ -19,20 +19,40 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve the paired main-app revision
+        run: |
+          APP_SHA=$(grep -Ev '^\s*(#|$)' deploy/APP_REVISION | head -1 | tr -d '[:space:]')
+          case "$APP_SHA" in
+            ''|PLACEHOLDER*) echo "deploy/APP_REVISION 还没填成真实 SHA：跨仓判据会跟着 main 浮动跑，" \
+                              "后台绿而线上主应用是另一版时没人看得出来。" >&2; exit 1;;
+          esac
+          echo "APP_SHA=$APP_SHA" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           repository: clowndest-svg/JianZhiSuXingRuanJian
-          ref: main
+          ref: ${{ env.APP_SHA }}
           path: main-app
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install test dependencies
         run: python -m pip install -r main-app/requirements-dev.txt
+      - name: Record which two revisions this run proves compatible
+        run: |
+          {
+            echo "## 跨仓配对"
+            echo "- 后台源码：$GITHUB_SHA"
+            echo "- 主应用源码：$APP_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Run isolated admin API and data-safety tests
         env:
           QINGSU_APP_REPO: ${{ github.workspace }}/main-app
         run: python tests/test_ops_api.py
+      - name: Verify cross-repository session, export and deletion boundaries
+        env:
+          QINGSU_APP_REPO: ${{ github.workspace }}/main-app
+          QINGSU_ADMIN_REPO: ${{ github.workspace }}
+        run: python main-app/tests/test_optimization_security.py
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

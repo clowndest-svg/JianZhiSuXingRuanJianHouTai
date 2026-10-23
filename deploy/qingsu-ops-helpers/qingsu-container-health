@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 单独授权的理由：docker.sock 等价于 root，容器健康只需要一条固定的只读 inspect，不该为此把服务账号塞进 docker 组冒充降权。
+set -euo pipefail
+
+ALLOWED_CONTAINERS='qingsu-console qingsu-tls'
+INSPECT_FORMAT='{{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}'
+
+# 白名单逐字比对：不做前缀匹配，也不做 glob，少一个字符都算越界
+valid_container_arguments() {
+  [ "$#" -eq 1 ] || return 1
+  local allowed
+  for allowed in $ALLOWED_CONTAINERS; do
+    if [ "$1" = "$allowed" ]; then return 0; fi
+  done
+  return 1
+}
+
+run_as_command() {
+  if ! valid_container_arguments "$@"; then
+    echo "容器名不在白名单，只允许：$ALLOWED_CONTAINERS" >&2
+    exit 2
+  fi
+  exec docker inspect --format "$INSPECT_FORMAT" "$1"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then run_as_command "$@"; fi

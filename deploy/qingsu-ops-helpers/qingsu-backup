@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# 单独授权的理由：备份要写 root:700 的 /opt/qingsu/backups，把那个目录直接给服务账号，等于把整条备份链（含历史快照）一并交出去。
+set -euo pipefail
+
+BACKUP_SCRIPT=/opt/qingsu/backup.py
+PYTHON_BIN=/usr/bin/python3
+
+# 只接受"不带任何参数"这一种调用形状：多一个参数就多一分被解释成别的动作的机会
+valid_backup_arguments() { [ "$#" -eq 0 ]; }
+
+run_as_command() {
+  if ! valid_backup_arguments "$@"; then
+    echo 'qingsu-backup 不接受任何参数' >&2
+    exit 2
+  fi
+  if [ ! -f "$BACKUP_SCRIPT" ] || [ -L "$BACKUP_SCRIPT" ]; then
+    echo "备份脚本不是普通文件：$BACKUP_SCRIPT" >&2
+    exit 1
+  fi
+  exec "$PYTHON_BIN" "$BACKUP_SCRIPT"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then run_as_command "$@"; fi

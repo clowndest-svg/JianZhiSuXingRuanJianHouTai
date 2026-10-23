@@ -120,6 +120,8 @@
     <button data-go="reports-workspace">举报审核</button>
     <button data-go="users">用户</button>
     <button data-go="gate">强更门</button>
+    <button data-go="sessions">后台会话</button>
+    <button data-go="pairing">版本配对</button>
     <button data-go="backup">备份</button>
     <button data-go="audit">审计</button>
   </nav>
@@ -147,8 +149,11 @@
       <label for="fb-filter">状态</label>
       <select id="fb-filter"><option value="">全部状态</option><option value="new">待处理</option>
         <option value="doing">处理中</option><option value="done">已处理</option><option value="wontfix">暂不做</option></select>
+      <select id="fb-kind" aria-label="反馈类型"><option value="">全部类型</option><option value="bug">故障</option><option value="idea">建议</option><option value="data">数据</option><option value="other">其他</option></select>
+      <input id="fb-build" type="number" min="0" placeholder="构建号" aria-label="构建号">
       <button id="fb-refresh">刷新</button><span class="muted" id="fb-counts"></span>
     </div>
+    <div id="fb-pages" class="row"></div>
     <div class="workspace">
       <div id="fb-list" class="queue"><div class="queue-empty">正在读取反馈…</div></div>
       <article id="fb-detail" class="detail"><div class="queue-empty">选择一条反馈查看详情并回复。</div></article>
@@ -161,8 +166,10 @@
       <label for="report-filter">队列</label>
       <select id="report-filter"><option value="open">待处理</option><option value="actioned">已下架</option>
         <option value="dismissed">已驳回</option><option value="all">全部</option></select>
+      <select id="report-kind" aria-label="举报对象类型"><option value="">全部对象</option><option value="post">帖子</option><option value="comment">评论</option><option value="user">用户</option></select>
       <button id="report-refresh">刷新</button><span class="muted" id="report-counts"></span>
     </div>
+    <div id="report-pages" class="row"></div>
     <div class="workspace">
       <div id="report-list" class="queue"><div class="queue-empty">正在读取举报…</div></div>
       <article id="report-detail" class="detail"><div class="queue-empty">选择一条举报查看内容与处理记录。</div></article>
@@ -198,6 +205,7 @@
       <button id="search">查找</button>
       <span class="muted">列表只出白名单列，凭据列在这里根本不会被查。</span>
     </div>
+    <div id="user-pages" class="row"></div>
     <div id="utable"></div>
     <p class="note">封号必须写原因——用户来问的时候，"已被停用"后面得跟得出话。
       重置口令会同时撤销该用户全部会话；注销要先看服务端算出的待删行数再确认。</p>
@@ -221,6 +229,26 @@
       也要求把当前值原样带回。有没有真的生效，以下面回读的 /health/ready 为准，不看本页返回 200。</p>
   </section>
 
+  <section id="sessions" hidden>
+    <h2>后台会话</h2>
+    <div id="sessstate"></div>
+    <h3>撤销某个命名账号的全部会话</h3>
+    <div class="row">
+      <input type="text" id="starget" placeholder="要撤销的账号名" style="min-width:200px">
+      <input type="text" id="sphrase" placeholder="原样输入：撤销 &lt;账号名&gt; 的全部后台会话" style="min-width:320px">
+      <button class="danger" id="srevoke">撤销</button>
+    </div>
+    <p class="note">退出登录会真的撤销服务端会话，不是只清浏览器 Cookie。
+      换掉某个命名账号的口令，它名下已签发的会话当场作废——这一页能让你看见现在还有谁在线。</p>
+  </section>
+
+  <section id="pairing" hidden>
+    <h2>主后台版本配对</h2>
+    <div id="pairstate"></div>
+    <p class="note">两仓共用一个库：后台要写的列由主应用的迁移创建。
+      配对没对上时先升级主服务，别先发后台。</p>
+  </section>
+
   <section id="backup" hidden>
     <h2>数据备份</h2>
     <div class="row"><button class="primary" id="dobackup">立即备份并校验</button><span class="muted" id="bkstate"></span></div>
@@ -230,7 +258,8 @@
 
   <section id="audit" hidden>
     <h2>操作审计</h2>
-    <div class="row"><button id="reload-audit">重新加载</button><span class="muted">最近 40 条</span></div>
+    <div class="row"><button id="reload-audit">重新加载</button><input id="audit-action" placeholder="动作（精确匹配）" aria-label="审计动作"><input id="audit-kind" placeholder="对象类型" aria-label="审计对象类型"></div>
+    <div id="audit-pages" class="row"></div>
     <div id="atable"></div>
     <p class="note">高危动作前后值都留痕；失败的尝试（比如撞令牌）也在里面。</p>
   </section>
@@ -245,6 +274,45 @@ const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v === null || v === undefined ? "" : v)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+const pages = {};
+function setupPages(name, container, reload){
+  const p=pages[name]={cursor:0,history:[],next:0,more:false,key:'',generation:0};
+  $(container).innerHTML='<button type="button" data-page="first">首页</button><button type="button" data-page="previous">上一页</button><span role="status"></span><button type="button" data-page="next">下一页</button>';
+  p.container=$(container);
+  p.container.addEventListener('click',event=>{
+    const action=event.target.dataset.page;if(!action)return;
+    if(action==='next'&&p.more){p.history.push(p.cursor);p.cursor=p.next;}
+    else if(action==='previous'&&p.history.length){p.cursor=p.history.pop();}
+    else if(action==='first'){p.cursor=0;p.history=[];}
+    else return;
+    reload();
+  });
+  pageDone(name,{items:[],total:0});
+}
+function pageStart(name, filters){
+  const p=pages[name],key=JSON.stringify(filters);
+  if(p.key!==key){p.cursor=0;p.history=[];p.key=key;}
+  p.generation++;
+  p.container.querySelectorAll('button').forEach(button=>button.disabled=true);
+  return {cursor:p.cursor,generation:p.generation};
+}
+function pageDone(name, data){
+  const p=pages[name];p.next=data.next_cursor||0;p.more=!!data.more;
+  p.container.querySelector('[data-page="first"]').disabled=!p.history.length;
+  p.container.querySelector('[data-page="previous"]').disabled=!p.history.length;
+  p.container.querySelector('[data-page="next"]').disabled=!p.more;
+  p.container.querySelector('span').textContent='第 '+(p.history.length+1)+' 页 · 本页 '+(data.items||[]).length+' 条 · 共 '+(data.total??'—')+' 条';
+}
+function pageFailed(name){
+  const p=pages[name];p.container.querySelector('span').textContent='本页读取失败，请刷新重试';
+  p.container.querySelector('[data-page="first"]').disabled=!p.history.length;
+  p.container.querySelector('[data-page="previous"]').disabled=!p.history.length;
+}
+setupPages('feedback','fb-pages',()=>loadFeedback());
+setupPages('reports','report-pages',()=>loadReports());
+setupPages('users','user-pages',()=>loadUsers());
+setupPages('audit','audit-pages',()=>refreshAudit());
 
 let toastTimer = 0;
 function toast(msg, kind) {
@@ -280,7 +348,10 @@ const tag = (text, cls) => '<span class="tag ' + cls + '">' + esc(text) + "</spa
 async function whoami() {
   try {
     const d = await api("/whoami");
-    $("who").textContent = "已登录：" + (d.actor === "script" ? "脚本令牌" : "本机会话");
+    // 身份现在是命名账号（可能是 xiaotian，也可能是 script:runner）：
+    // 只显示"本机会话"就等于把"谁改的这条"这个答案从界面上抹掉了。
+    $("who").textContent = "已登录：" + (String(d.actor || "").startsWith("script:")
+      ? "脚本凭据 " + d.actor.slice(7) : String(d.actor || "未知身份"));
     $("login").hidden = true; $("nav").hidden = false; $("logout").hidden = false; $("hint").hidden = false;
     show("overview"); refreshAll();
     return true;
@@ -312,7 +383,7 @@ $("logout").onclick = async () => {
 
 /* ---------- 分页 ---------- */
 function show(name) {
-  ["overview", "site-status", "mail-settings", "feedback-workspace", "reports-workspace", "users", "gate", "backup", "audit"]
+  ["overview", "site-status", "mail-settings", "feedback-workspace", "reports-workspace", "users", "gate", "sessions", "pairing", "backup", "audit"]
     .forEach((s) => { $(s).hidden = s !== name; });
   document.querySelectorAll("#nav [data-go]").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
   if (name === "overview") refreshAll();
@@ -320,6 +391,8 @@ function show(name) {
   if (name === "mail-settings") refreshMail();
   if (name === "feedback-workspace") loadFeedback();
   if (name === "reports-workspace") loadReports();
+  if (name === "sessions") refreshSessions();
+  if (name === "pairing") refreshPairing();
   if (name === "users" && !$("utable").innerHTML.trim()) loadUsers();
   if (name === "gate") refreshGate();
   if (name === "audit") refreshAudit();
@@ -401,6 +474,8 @@ let selectedFeedbackId = 0;
 let selectedFeedback = null;
 $("fb-refresh").onclick = () => loadFeedback(selectedFeedbackId);
 $("fb-filter").onchange = () => loadFeedback();
+$("fb-kind").onchange = () => loadFeedback();
+$("fb-build").onchange = () => loadFeedback();
 $("fb-list").addEventListener("click", (ev) => {
   const button = ev.target.closest("[data-fb-id]");
   if (button) openFeedback(Number(button.dataset.fbId));
@@ -425,10 +500,15 @@ $("fb-detail").addEventListener("click", async (ev) => {
 });
 
 async function loadFeedback(preferredId) {
+  let generation;
   $("fb-list").innerHTML = '<div class="queue-empty">正在读取反馈…</div>';
   try {
     const status = $("fb-filter").value;
-    const d = await api("/feedback?status=" + encodeURIComponent(status) + "&limit=50");
+    const filters={status,kind:$("fb-kind").value,build:$("fb-build").value||0};
+    const page=pageStart('feedback',filters);generation=page.generation;
+    const d=await api('/feedback?'+new URLSearchParams({...filters,cursor:page.cursor,limit:50}));
+    if(page.generation!==pages.feedback.generation)return;
+    pageDone('feedback',d);
     feedbackItems = d.items || [];
     const counts = d.counts || {};
     $("fb-counts").textContent = "待处理 " + (counts.new || 0) + " · 处理中 " + (counts.doing || 0)
@@ -447,14 +527,19 @@ async function loadFeedback(preferredId) {
     const chosen = feedbackItems.find((f) => Number(f.id) === Number(preferredId)) || feedbackItems[0];
     await openFeedback(Number(chosen.id));
   } catch (e) {
+    if(generation!==undefined&&generation!==pages.feedback.generation)return;
     $("fb-list").innerHTML = '<div class="queue-empty">读取失败：' + esc(e.message) + "</div>";
+    pageFailed("feedback");
     toast("反馈读取失败：" + e.message);
   }
 }
 
+let feedbackDetailGeneration=0;
 async function openFeedback(id) {
+  const generation=++feedbackDetailGeneration,pageGeneration=pages.feedback.generation;
   try {
     const f = await api("/feedback/" + id);
+    if(generation!==feedbackDetailGeneration||pageGeneration!==pages.feedback.generation)return;
     selectedFeedback = f; selectedFeedbackId = Number(id);
     $("fb-list").querySelectorAll("[data-fb-id]").forEach((b) =>
       b.classList.toggle("selected", Number(b.dataset.fbId) === Number(id)));
@@ -469,7 +554,7 @@ async function openFeedback(id) {
       + '<label for="fb-reply">回复用户（最多 800 字）</label><textarea id="fb-reply" maxlength="800">'
       + esc(f.reply || "") + '</textarea><div class="row"><button class="primary" id="save-feedback">保存处理并通知用户</button>'
       + '<span class="note">保存后用户可在 App 的“我的反馈”中查看。</span></div>';
-  } catch (e) { toast("反馈详情读取失败：" + e.message); }
+  } catch (e) { if(generation!==feedbackDetailGeneration||pageGeneration!==pages.feedback.generation)return;toast("反馈详情读取失败：" + e.message); }
 }
 
 /* ---------- 举报审核 ---------- */
@@ -479,6 +564,7 @@ let selectedReportId = 0;
 let selectedReport = null;
 $("report-refresh").onclick = () => loadReports(selectedReportId);
 $("report-filter").onchange = () => loadReports();
+$("report-kind").onchange = () => loadReports();
 $("report-list").addEventListener("click", (ev) => {
   const button = ev.target.closest("[data-report-id]");
   if (button) openReport(Number(button.dataset.reportId));
@@ -513,10 +599,15 @@ $("report-detail").addEventListener("click", async (ev) => {
 });
 
 async function loadReports(preferredId) {
+  let generation;
   $("report-list").innerHTML = '<div class="queue-empty">正在读取举报…</div>';
   try {
     const status = $("report-filter").value;
-    const d = await api("/reports?status=" + encodeURIComponent(status) + "&limit=50");
+    const filters={status,target_kind:$("report-kind").value};
+    const page=pageStart('reports',filters);generation=page.generation;
+    const d=await api('/reports?'+new URLSearchParams({...filters,cursor:page.cursor,limit:50}));
+    if(page.generation!==pages.reports.generation)return;
+    pageDone('reports',d);
     reportItems = d.items || [];
     const counts = d.counts || {};
     $("report-counts").textContent = "待处理 " + (counts.open || 0) + " · 已下架 "
@@ -537,7 +628,9 @@ async function loadReports(preferredId) {
     const chosen = reportItems.find((x) => Number(x.id) === Number(preferredId)) || reportItems[0];
     openReport(Number(chosen.id));
   } catch (e) {
+    if(generation!==undefined&&generation!==pages.reports.generation)return;
     $("report-list").innerHTML = '<div class="queue-empty">读取失败：' + esc(e.message) + "</div>";
+    pageFailed("reports");
     toast("举报读取失败：" + e.message);
   }
 }
@@ -573,8 +666,13 @@ $("search").onclick = () => loadUsers();
 $("q").addEventListener("keydown", (ev) => { if (ev.key === "Enter") loadUsers(); });
 
 async function loadUsers() {
+  let generation;
   try {
-    const d = await api("/users?limit=20&q=" + encodeURIComponent($("q").value.trim()));
+    const filters={q:$("q").value.trim()};
+    const page=pageStart('users',filters);generation=page.generation;
+    const d=await api('/users?'+new URLSearchParams({...filters,cursor:page.cursor,limit:20}));
+    if(page.generation!==pages.users.generation)return;
+    pageDone('users',d);
     if (!d.items.length) { $("utable").innerHTML = '<p class="muted">没找到人。支持 id、用户名、昵称、轻塑号。</p>'; return; }
     $("utable").innerHTML = "<table><tr><th>id</th><th>用户名</th><th>昵称</th><th>轻塑号</th>"
       + "<th>注册于</th><th>状态</th><th>会话</th><th>动作</th></tr>"
@@ -594,7 +692,8 @@ async function loadUsers() {
         + '<button data-act="dm" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">导出会话</button>'
         + '<button class="danger" data-act="delete" data-id="' + esc(u.id) + '" data-name="' + esc(u.username) + '">注销</button>'
         + "</div></td></tr>").join("") + "</table>";
-  } catch (e) { toast("读用户失败：" + e.message); }
+  } catch (e) {
+    if(generation!==undefined&&generation!==pages.users.generation)return; pageFailed("users");toast("读用户失败：" + e.message); }
 }
 
 /* 高危动作一律先回显确认：把用户名（和注销时的行数）原样 typed 回来，服务端比对。 */
@@ -675,15 +774,19 @@ async function refreshGate() {
     const g = await api("/gate");
     $("gcurrent").value = g.override === null ? "" : g.override;
     const seen = g.seen_builds ? Object.entries(g.seen_builds).map(([k, v]) => k + "×" + v).join(" ") : "（还没有读数）";
+    const rel = g.release || {};
     $("gatestate").innerHTML = "<table>"
       + row("运维刹车值 override", tag(String(g.override), g.brake_on ? "mid" : "bad"))
       + row("清单 min_version_code", tag(String(g.manifest_min), ""))
       + row("清单最新构建", tag(String(g.manifest_code), ""))
       + row("当前生效", tag(String(g.effective), ""))
+      + row("安装包可安装", tag(rel.installable ? "已核验（包在、大小与 SHA-256 对得上、包内自报构建号一致）"
+            : "不可安装：" + (rel.reason || "未知原因"), rel.installable ? "ok" : "bad"))
       + row("主应用自报 min_build", tag(String(g.min_build_reported_by_app === undefined ? "拿不到" : g.min_build_reported_by_app), ""))
       + row("自上次重启见过的构建", tag(seen, ""))
       + row("被挡请求数", tag(String(g.blocked_since_restart), ""))
       + "</table>" + (g.note ? '<p class="note">' + esc(g.note) + "</p>" : "");
+    if (!rel.installable) $("graise").disabled = true; else $("graise").disabled = false;
     if (g.app_error) toast("主应用健康接口拿不到：" + g.app_error + " —— 生效值一律不可信");
   } catch (e) { toast("读门失败：" + e.message); }
 }
@@ -693,18 +796,69 @@ $("graise").onclick = async () => {
   if (!window.confirm("把门从 " + cur + " 抬到 " + nw + "？低于 " + nw + " 的客户端会立刻打不开，且门只能再往上抬。")) return;
   try {
     const d = await api("/gate", { method: "POST", body: JSON.stringify({ expect_current: cur, new: nw }) });
-    toast("已写入 " + d.written + "；主应用回读 min_build=" + d.reported_by_app + "，被挡 " + d.blocked_now);
+    // 主应用没答话时不能说"已生效"：门文件写对了不等于所有人都被挡在外面了
+    toast(d.confirmed === false
+      ? "已写入 " + d.written + "，但主应用没回读确认（" + (d.app_error || "无答复") + "）：等它能答话后再看一次本页"
+      : "已写入 " + d.written + "；主应用回读 min_build=" + d.reported_by_app + "，被挡 " + d.blocked_now);
     refreshGate();
-  } catch (e) { toast("抬门失败：" + e.message); }
+  } catch (e) { toast("抬门失败：" + e.message); refreshGate(); }
 };
 $("gbrake").onclick = async () => {
   if ($("gphrase").value.trim() !== "放开全部客户端") { toast("要把门放开，必须原样输入那句确认"); return; }
   try {
     const d = await api("/brake", { method: "POST", body: JSON.stringify({ phrase: "放开全部客户端" }) });
-    toast("刹车已拉下，现在生效值 " + d.effective_now + "（谁都不拦）");
+    toast("刹车已拉下，现在生效值 " + d.effective_now + "（谁都不拦）"
+      + (d.confirmed_by_app === false ? "，但主应用没回读确认，请再看一次 /health/ready" : ""));
     $("gphrase").value = ""; refreshGate();
   } catch (e) { toast("失败：" + e.message); }
 };
+
+/* ---------- 后台会话 ---------- */
+async function refreshSessions() {
+  try {
+    const d = await api("/sessions");
+    if (!d.items.length) { $("sessstate").innerHTML = '<p class="note">现在没有任何有效后台会话。</p>'; return; }
+    $("sessstate").innerHTML = "<table><tr><th>会话号</th><th>命名账号</th><th>登录于</th>"
+      + "<th>最后活动</th><th>空闲剩余</th><th>绝对剩余</th><th>凭据</th></tr>"
+      + d.items.map((s) => "<tr>"
+        + "<td>" + esc(s.session) + "</td>"
+        + "<td>" + tag(esc(s.actor), "mid") + "</td>"
+        + "<td>" + esc(new Date(s.created_at * 1000).toLocaleString()) + "</td>"
+        + "<td>" + esc(new Date(s.last_seen * 1000).toLocaleString()) + "</td>"
+        + "<td>" + esc(Math.round(s.idle_left_seconds / 60) + " 分钟") + "</td>"
+        + "<td>" + esc(Math.round(s.absolute_left_seconds / 3600) + " 小时") + "</td>"
+        + "<td>" + tag(s.credential_rotated ? "口令已轮换（该会话已失效）" : "有效",
+              s.credential_rotated ? "bad" : "ok") + "</td>"
+        + "</tr>").join("") + "</table>" + (d.note ? '<p class="note">' + esc(d.note) + "</p>" : "");
+  } catch (e) { toast("读会话失败：" + e.message); }
+}
+$("srevoke").onclick = async () => {
+  const target = $("starget").value.trim();
+  if (!target) { toast("先写要撤销谁的会话"); return; }
+  const phrase = "撤销 " + target + " 的全部后台会话";
+  if ($("sphrase").value.trim() !== phrase) { toast("要撤销别人的会话，必须原样输入：" + phrase); return; }
+  try {
+    const d = await api("/sessions/revoke", { method: "POST", body: JSON.stringify({ target_actor: target, confirm: phrase }) });
+    toast("撤销了 " + d.revoked + " 个会话");
+    $("sphrase").value = ""; refreshSessions();
+  } catch (e) { toast("撤销失败：" + e.message); }
+};
+
+/* ---------- 版本配对 ---------- */
+async function refreshPairing() {
+  try {
+    const d = await api("/version-pairing");
+    $("pairstate").innerHTML = "<table>"
+      + row("后台源码", tag(String(d.admin_revision), d.admin_revision === "unknown" ? "mid" : "ok"))
+      + row("主应用发布", tag(String(d.app_release || "拿不到", ""), ""))
+      + row("主应用结构版本", tag(String(d.app_schema_version === null || d.app_schema_version === undefined ? "拿不到" : d.app_schema_version), ""))
+      + row("主应用代码要求", tag(String(d.app_schema_required === undefined ? "拿不到" : d.app_schema_required), ""))
+      + row("后台缺的列", tag(d.missing_app_columns.length ? d.missing_app_columns.join("、") : "无",
+            d.missing_app_columns.length ? "bad" : "ok"))
+      + row("配对", tag(d.paired ? "已对上" : "未对上", d.paired ? "ok" : "bad"))
+      + "</table>" + (d.note ? '<p class="note">' + esc(d.note) + "</p>" : "");
+  } catch (e) { toast("读配对信息失败：" + e.message); }
+}
 
 /* ---------- 备份 ---------- */
 $("dobackup").onclick = async () => {
@@ -719,8 +873,13 @@ $("dobackup").onclick = async () => {
 
 /* ---------- 审计 ---------- */
 async function refreshAudit() {
+  let generation;
   try {
-    const d = await api("/audit?limit=40");
+    const filters={action:$("audit-action").value.trim(),target_kind:$("audit-kind").value.trim()};
+    const page=pageStart('audit',filters);generation=page.generation;
+    const d=await api('/audit?'+new URLSearchParams({...filters,cursor:page.cursor,limit:40}));
+    if(page.generation!==pages.audit.generation)return;
+    pageDone('audit',d);
     $("atable").innerHTML = d.items.length ? "<table><tr><th>时间</th><th>谁</th><th>动作</th><th>对象</th>"
       + "<th>前</th><th>后</th><th>备注</th></tr>" + d.items.map((a) => "<tr>"
         + "<td>" + esc(a.created_at) + "</td><td>" + esc(a.actor) + "</td><td>" + esc(a.action) + "</td>"
@@ -729,7 +888,8 @@ async function refreshAudit() {
         + "<td><code>" + esc(short(a.after_json)) + "</code></td>"
         + "<td>" + esc(a.note || "") + "</td></tr>").join("") + "</table>"
       : '<p class="muted">还没有审计记录。</p>';
-  } catch (e) { toast("读审计失败：" + e.message); }
+  } catch (e) {
+    if(generation!==undefined&&generation!==pages.audit.generation)return; pageFailed("audit");toast("读审计失败：" + e.message); }
 }
 $("reload-audit").onclick = () => refreshAudit();
 function short(v) {
