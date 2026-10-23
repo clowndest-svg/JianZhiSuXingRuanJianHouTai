@@ -27,6 +27,7 @@ WorkingDirectory=/opt/qingsu/admin-console/ops
 # ProtectSystem=strict 之后站点目录只读，别让它把 __pycache__ 的写入失败当成故障
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
+Environment=QINGSU_OPS_USER=qingsu-ops
 Environment=QINGSU_DB=/opt/qingsu/data/qingsu.db
 Environment=QINGSU_ADMIN_SECRETS=/opt/qingsu/admin/console.json
 Environment=QINGSU_MIN_BUILD_FILE=/opt/qingsu/data/min_build

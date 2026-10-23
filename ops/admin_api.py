@@ -780,6 +780,7 @@ SUDO = [s for s in os.environ.get("QINGSU_SUDO", "sudo -n").split() if s]
 def helper_configured() -> dict:
     return {"gate": bool(GATE_HELPER), "backup": bool(BACKUP_HELPER),
             "health": bool(HEALTH_HELPER),
+            "effective_uid": getattr(os, 'geteuid', lambda: None)(),
             "service_user": os.environ.get("QINGSU_OPS_USER", "unknown")}
 
 
@@ -831,11 +832,16 @@ def health(actor: str = Depends(actor_of)):
             mem[k.lower()] = int(v.strip().split()[0]) // 1024
     except Exception:
         mem = {}
-    backups = sorted(os.listdir(BACKUP_DIR))[-3:] if os.path.isdir(BACKUP_DIR) else []
+    backup_listing = 'available'
+    try:
+        backups = sorted(os.listdir(BACKUP_DIR))[-3:] if os.path.isdir(BACKUP_DIR) else []
+    except PermissionError:
+        backups = None
+        backup_listing = 'restricted'
     return {"app": ready if ready is not None else {"unreachable": ready_err},
             "console_container": container,
             "disk_free_mb": disk.free // 1024 // 1024,
-            "mem_mb": mem, "recent_backups": backups, "ops_time": now_iso()}
+            "mem_mb": mem, "recent_backups": backups, "backup_listing": backup_listing, "ops_time": now_iso()}
 
 
 @app.get("/api/overview")
