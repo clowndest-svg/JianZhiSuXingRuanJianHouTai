@@ -33,6 +33,9 @@ Environment=QINGSU_MIN_BUILD_FILE=/opt/qingsu/data/min_build
 Environment=QINGSU_WEB_DIR=/opt/qingsu/web
 Environment=QINGSU_BACKUP_SCRIPT=/opt/qingsu/backup.py
 Environment=QINGSU_BACKUP_DIR=/opt/qingsu/backups/scheduled
+Environment=QINGSU_GATE_HELPER=/usr/local/sbin/qingsu-set-gate
+Environment=QINGSU_BACKUP_HELPER=/usr/local/sbin/qingsu-backup
+Environment=QINGSU_HEALTH_HELPER=/usr/local/sbin/qingsu-container-health
 Environment=QINGSU_LOCAL_API=http://172.17.0.1:8000
 Environment=QINGSU_CONSOLE_CONTAINER=qingsu-console
 Environment=QINGSU_PYTHON_BIN=/usr/bin/python3
