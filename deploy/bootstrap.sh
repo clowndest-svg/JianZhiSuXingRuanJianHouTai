@@ -230,7 +230,9 @@ print(len(data) if isinstance(data, list) else -1)
 }
 if [ -n "$DT" ]; then
   probe "运营读 users 全字段" "http://172.17.0.1:8055/items/users?limit=5&fields=*" clean
-  probe "运营显式要 password_hash" "http://172.17.0.1:8055/items/users?fields=id,password_hash" clean
+  # Explicitly requesting a forbidden field must be denied; an error response
+  # is not a successful clean read, and must not be confused with missing access.
+  probe "运营显式要 password_hash" "http://172.17.0.1:8055/items/users?fields=id,password_hash" deny
   probe "运营读 feedback" "http://172.17.0.1:8055/items/feedback?limit=3&fields=id,status,body" allow
   probe "运营读 profiles" "http://172.17.0.1:8055/items/profiles?limit=3&fields=*" clean
   probe "运营读 sessions" "http://172.17.0.1:8055/items/sessions?limit=3&fields=*" clean
