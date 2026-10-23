@@ -15,6 +15,15 @@ id qingsu-ops >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/
 id -nG qingsu-ops | tr ' ' '\n' | grep -qx qingsu || usermod -aG qingsu qingsu-ops
 chown root:qingsu-ops "$ADMIN"
 chmod 750 "$ADMIN"
+for config in console.json mail-check.json; do
+  if [ -f "$ADMIN/$config" ]; then
+    chown root:qingsu-ops "$ADMIN/$config"
+    chmod 640 "$ADMIN/$config"
+  fi
+done
+[ -e /opt/qingsu/mail.json ] || touch /opt/qingsu/mail.json
+chown qingsu-ops:qingsu /opt/qingsu/mail.json
+chmod 640 /opt/qingsu/mail.json
 
 echo "== 1. 装 unit 并起服务"
 cp "$BASE/qingsu-ops.service" /etc/systemd/system/qingsu-ops.service
