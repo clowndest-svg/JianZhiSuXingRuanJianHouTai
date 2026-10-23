@@ -17,6 +17,10 @@ good() { printf '绿 %s\n' "$1"; }
 
 mkdir -p "$BASE" "$ADMIN"
 chmod 700 "$ADMIN"
+if getent group qingsu-ops >/dev/null; then
+  chown root:qingsu-ops "$ADMIN"
+  chmod 750 "$ADMIN"
+fi
 
 echo "== 1. 密钥文件（root:600，值永不打印）"
 if [ -f "$ADMIN/console.json" ]; then
@@ -62,10 +66,21 @@ if added:
 print("补了键：", added or "无（Basic 口令已存在）")
 PY
 chmod 600 "$ADMIN/console.json"
+if getent group qingsu-ops >/dev/null; then
+  chown root:qingsu-ops "$ADMIN/console.json"
+  chmod 640 "$ADMIN/console.json"
+fi
 
 # compose 只吃 env 文件，所以从 json 现生成一份（每次重生成，保证和 json 一致）
 # DIRECTUS_IMAGE 带 @sha256 摘要才允许起容器（方案 C04）：浮动 :11 会在某次 pull 时
 # 静默换成新的补丁版，于是"上周验过的后台"和"这周跑着的后台"不是同一份东西。
+if [ -z "${DIRECTUS_IMAGE_PIN:-}" ] && [ -s "$ADMIN/../directus.pin" ]; then
+  export DIRECTUS_IMAGE_PIN="$(cat "$ADMIN/../directus.pin")"
+fi
+if [[ ! ${DIRECTUS_IMAGE_PIN:-} =~ ^[A-Za-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]]; then
+  bad "Directus 镜像摘要缺失或格式非法，保留已有配置并退出"
+  exit 1
+fi
 python3 - "$ADMIN/console.json" "$ADMIN/directus.env" <<'PY'
 import json, os, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
