@@ -49,7 +49,9 @@ TimeoutStartSec=30
 # 沙箱收紧：根文件系统只读，只有下面这三处确实要写；/tmp 各进程私有，别人家的临时文件看不见。
 ProtectSystem=strict
 PrivateTmp=yes
-ReadWritePaths=/opt/qingsu/data /opt/qingsu/admin /opt/qingsu/mail.json /opt/qingsu/uploads
+# The sudo backup helper inherits this mount namespace. The directory remains
+# root:0700, so only the privileged helper can use this writable mount.
+ReadWritePaths=/opt/qingsu/data /opt/qingsu/admin /opt/qingsu/mail.json /opt/qingsu/uploads /opt/qingsu/backups
 # NoNewPrivileges=yes 先不进这个 unit：它和"经 sudo 调 helper"是互斥的——NNP 一开，
 # setuid 的 sudo 直接报 no new privileges，备份/改门/健康查询三件全部失效。
 # 要真正打开 NNP，得把这三个动作换成 socket 激活的 root helper（服务只连本地套接字，不碰 setuid），
