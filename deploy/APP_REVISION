@@ -4,4 +4,4 @@
 # CI 跟着 main 浮动，就会出现「后台这边绿、线上主应用是另一版」——两仓各自发版时
 # 根本没人知道配没配对。改这个值的时机：主应用发了一版跟后台有关的改动，
 # 并在 /api/version-pairing 上确认 paired=true 之后。
-610f8b406a0c3d2d7dff7e87b6c5b3194b550ceb
+f8af43d15df7e234bfe33723d1bbff494ee7fe54

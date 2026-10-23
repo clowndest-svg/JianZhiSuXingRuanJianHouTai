@@ -1,7 +1,7 @@
 name: qingsu-console
 
 # 这台机器只有 3.6G 内存、Directus 常驻约 223MiB（docs/03 §8 实测），
-# 所以这一层不做水平扩展、不加内存限制的"保险"也不做——先把资源说清楚。
+# 所以这一层保持单实例，并把现网资源上限写进重建配置。
 services:
   directus:
     # 钉到摘要，不跟浮动标签（方案 C04）：`:11` 会在某次 docker pull 时静默换成 11.x 的新补丁版，
@@ -11,6 +11,9 @@ services:
     image: ${DIRECTUS_IMAGE:-directus/directus:11}
     container_name: qingsu-console
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 1.0
     # K-1：用应用 uid(993) 跑会起不来（/directus 内部要写 .directus 与 uploads，pm2 要可写 HOME）。
     # K-2/K-3：用镜像原生 uid + 附加组 qingsu(993) + 数据目录 setgid，才能与主应用共享同一个 WAL 库。
     user: "1000:1000"
