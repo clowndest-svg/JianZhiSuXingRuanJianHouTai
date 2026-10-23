@@ -53,6 +53,14 @@ jobs:
           QINGSU_APP_REPO: ${{ github.workspace }}/main-app
           QINGSU_ADMIN_REPO: ${{ github.workspace }}
         run: python main-app/tests/test_optimization_security.py
+      # 这两条同样借两边仓库的夹具，但一直没接进任何流水线——等于没在守
+      - name: Verify admin data contracts and user-facing records/profile/permission
+        env:
+          QINGSU_APP_REPO: ${{ github.workspace }}/main-app
+          QINGSU_ADMIN_REPO: ${{ github.workspace }}
+        run: |
+          python main-app/tests/test_optimization_data.py
+          python main-app/tests/test_optimization_ux.py
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

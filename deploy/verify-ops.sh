@@ -10,6 +10,12 @@ good() { printf '绿 %s\n' "$1"; }
 bad() { printf '红 %s\n' "$1"; FAIL=1; }
 say() { printf '   %s %s\n' "$1" "$2"; }
 
+# Provision the identity and secret-directory traversal before first startup.
+id qingsu-ops >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin qingsu-ops
+id -nG qingsu-ops | tr ' ' '\n' | grep -qx qingsu || usermod -aG qingsu qingsu-ops
+chown root:qingsu-ops "$ADMIN"
+chmod 750 "$ADMIN"
+
 echo "== 1. 装 unit 并起服务"
 cp "$BASE/qingsu-ops.service" /etc/systemd/system/qingsu-ops.service
 chmod 644 /etc/systemd/system/qingsu-ops.service

@@ -21,6 +21,7 @@ Type=simple
 # 现场就是"后台点了一下，全站变只读"。删一行等于把 F-1 放出来。
 User=qingsu-ops
 Group=qingsu
+SupplementaryGroups=qingsu-ops
 UMask=0002
 WorkingDirectory=/opt/qingsu/admin-console/ops
 # ProtectSystem=strict 之后站点目录只读，别让它把 __pycache__ 的写入失败当成故障
