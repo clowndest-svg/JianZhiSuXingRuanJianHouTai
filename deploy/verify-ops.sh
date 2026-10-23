@@ -24,6 +24,8 @@ done
 [ -e /opt/qingsu/mail.json ] || touch /opt/qingsu/mail.json
 chown qingsu-ops:qingsu /opt/qingsu/mail.json
 chmod 640 /opt/qingsu/mail.json
+chown qingsu:qingsu /opt/qingsu/uploads
+chmod 2770 /opt/qingsu/uploads
 
 echo "== 1. 装 unit 并起服务"
 cp "$BASE/qingsu-ops.service" /etc/systemd/system/qingsu-ops.service
