@@ -51,7 +51,7 @@ grep -q 'cat > "$tmp"' "$HELPERS/qingsu-set-gate" && grep -q 'mv -f "$tmp" "$GAT
   && good "写门是同目录临时文件 + mv 原子替换" || bad "写门没有走 cat > 临时文件 + mv 的原子替换"
 grep -q 'exec docker inspect --format' "$HELPERS/qingsu-container-health" \
   && good "健康查询只有固定 docker inspect --format 一条" || bad "健康查询不止一条固定命令"
-grep -q 'exec "$PYTHON_BIN" "$BACKUP_SCRIPT"' "$HELPERS/qingsu-backup" \
+grep -Fq 'exec /usr/bin/systemd-run --quiet --wait --pipe --collect --property=RuntimeMaxSec=590 "$PYTHON_BIN" "$BACKUP_SCRIPT"' "$HELPERS/qingsu-backup" \
   && good "backup 是固定脚本、固定解释器" || bad "backup 的命令形状不固定"
 
 WRITE_DIR=$(mktemp -d 2>/dev/null || echo "${TEMP:-/tmp}/qingsu-gate-$$")

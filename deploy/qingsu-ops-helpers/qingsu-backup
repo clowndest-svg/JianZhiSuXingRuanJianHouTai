@@ -17,7 +17,10 @@ run_as_command() {
     echo "备份脚本不是普通文件：$BACKUP_SCRIPT" >&2
     exit 1
   fi
-  exec "$PYTHON_BIN" "$BACKUP_SCRIPT"
+  # Separate writable bind mounts in the API sandbox make hardlinks return EXDEV.
+  # Ask PID 1 to run this one fixed command in its own namespace; no caller arguments
+  # or environment are forwarded. Wait for its actual status and cap its lifetime.
+  exec /usr/bin/systemd-run --quiet --wait --pipe --collect --property=RuntimeMaxSec=590 "$PYTHON_BIN" "$BACKUP_SCRIPT"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then run_as_command "$@"; fi
