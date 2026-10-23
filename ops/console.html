@@ -780,7 +780,7 @@ async function refreshGate() {
       + row("清单 min_version_code", tag(String(g.manifest_min), ""))
       + row("清单最新构建", tag(String(g.manifest_code), ""))
       + row("当前生效", tag(String(g.effective), ""))
-      + row("安装包可安装", tag(rel.installable ? "已核验（包在、大小与 SHA-256 对得上、包内自报构建号一致）"
+      + row("发布物一致性", tag(rel.installable ? "包存在，大小与包内构建号一致；正式签名与设备升级见发布验收"
             : "不可安装：" + (rel.reason || "未知原因"), rel.installable ? "ok" : "bad"))
       + row("主应用自报 min_build", tag(String(g.min_build_reported_by_app === undefined ? "拿不到" : g.min_build_reported_by_app), ""))
       + row("自上次重启见过的构建", tag(seen, ""))

@@ -834,7 +834,9 @@ def health(actor: str = Depends(actor_of)):
         mem = {}
     backup_listing = 'available'
     try:
-        backups = sorted(os.listdir(BACKUP_DIR))[-3:] if os.path.isdir(BACKUP_DIR) else []
+        backups = sorted(os.listdir(BACKUP_DIR))[-3:]
+    except FileNotFoundError:
+        backups = []
     except PermissionError:
         backups = None
         backup_listing = 'restricted'
@@ -1553,7 +1555,7 @@ def release_check(verify_hash: bool = False) -> dict:
     所以核的是文件本身，不是清单自己说自己是几。
     """
     out = {"manifest_ok": False, "version_code": 0, "apk_present": False, "apk_size_ok": False,
-           "apk_sha_ok": False, "apk_build_ok": False, "installable": False, "reason": ""}
+           "apk_sha_ok": None, "apk_build_ok": False, "installable": False, "reason": ""}
     try:
         with open(os.path.join(WEB_DIR, "version.json"), encoding="utf-8") as handle:
             manifest = json.load(handle)
@@ -1854,10 +1856,10 @@ def backup_now(actor: str, body: dict):
     def list_backups():
         """降权后备份目录（root:700）本进程可能列不出来。列不出来不等于没有备份，
         所以这里只回报"看不看得见"，不把空集合当成"一个都没有"。"""
-        if not os.path.isdir(BACKUP_DIR):
-            return set(), True
         try:
             return set(os.listdir(BACKUP_DIR)), True
+        except FileNotFoundError:
+            return set(), True
         except OSError:
             return set(), False
 

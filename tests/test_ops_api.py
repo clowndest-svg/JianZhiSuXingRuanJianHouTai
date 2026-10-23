@@ -771,6 +771,23 @@ class OpsApi(unittest.TestCase):
         self.assertEqual(r.json()["integrity"], "ok")
         self.assertTrue((Path(self.ops_mod.BACKUP_DIR) / r.json()["snapshot"]).is_file())
 
+    def test_backup_parent_not_traversable_uses_verified_helper_output(self):
+        from unittest.mock import patch
+        # isdir returns False for EACCES on a parent, just as for a missing path.
+        with patch.object(self.ops_mod.os.path, 'isdir', return_value=False), \
+             patch.object(self.ops_mod.os, 'listdir', side_effect=PermissionError()), \
+             patch.object(self.ops_mod, 'run_privileged', return_value={
+                 'returncode':0,'stdout':'{"backup":"synthetic","integrity":"ok"}\n','stderr':''}):
+            result=self.ops_mod.backup_now('test',{})
+        self.assertFalse(result['directory_readable'])
+        self.assertEqual(result['integrity'],'ok')
+        self.assertEqual(result['snapshot'],'synthetic')
+
+    def test_unchecked_apk_hash_is_unknown_not_failed(self):
+        write_fake_release(self.root,34)
+        self.assertIsNone(self.ops_mod.release_check()['apk_sha_ok'])
+        self.assertIs(self.ops_mod.release_check(verify_hash=True)['apk_sha_ok'],True)
+
 
 class SeedContract(unittest.TestCase):
     """播种脚本的格式契约。这条是上线后由联动测试抓出来的真实故障：
