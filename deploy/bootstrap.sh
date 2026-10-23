@@ -20,6 +20,10 @@ chmod 700 "$ADMIN"
 if getent group qingsu-ops >/dev/null; then
   chown root:qingsu-ops "$ADMIN"
   chmod 750 "$ADMIN"
+  # Existing root deployments may have code mode 0700; keep code immutable but readable after dropping uid.
+  for code in "$BASE/ops/admin_api.py" "$BASE/ops/console.html"; do
+    if [ -f "$code" ]; then chown root:qingsu-ops "$code"; chmod 640 "$code"; fi
+  done
 fi
 
 echo "== 1. 密钥文件（root:600，值永不打印）"

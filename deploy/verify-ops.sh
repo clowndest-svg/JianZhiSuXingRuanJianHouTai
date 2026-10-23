@@ -15,6 +15,9 @@ id qingsu-ops >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/
 id -nG qingsu-ops | tr ' ' '\n' | grep -qx qingsu || usermod -aG qingsu qingsu-ops
 chown root:qingsu-ops "$ADMIN"
 chmod 750 "$ADMIN"
+for code in "$BASE/ops/admin_api.py" "$BASE/ops/console.html"; do
+  if [ -f "$code" ]; then chown root:qingsu-ops "$code"; chmod 640 "$code"; fi
+done
 for config in console.json mail-check.json; do
   if [ -f "$ADMIN/$config" ]; then
     chown root:qingsu-ops "$ADMIN/$config"
