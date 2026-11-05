@@ -6,8 +6,12 @@
 
 既有42项后台测试追加实际主应用写回执后的删号验证：删除预案计数包含本人回执，实际删除后本人回执清零、其他用户的同名请求回执保留，外键无孤儿。已在本地schema17夹具通过。主应用另通过15项照片/一致性API、16项照片Chromium流程和关联回归。
 
-配对源码、CI和生产结果在主应用门禁上线后记录；后台不抢先创建或迁移业务表。
+后台不抢先创建或迁移业务表。
 
 追加修复：生产版本配对接口仍读取旧systemd环境值，显示6335e3a，尽管部署元数据已更新。CI现在把真实Git提交写入部署产物，接口优先使用经过格式校验的构建标记；未盖章的开发环境仍兼容环境变量。没有新增可读文件权限或更改后台部署入口。新增实际API判据验证构建标记优先于过期环境值。
 
 主应用源码c1d7c0bbb949a4e33ae6d59dfaccb2812e0c6860，[CI42072201117](https://github.com/clowndest-svg/JianZhiSuXingRuanJian/actions/runs/42072201117)全部成功，生产r42072201117/schema17的paired=true已确认后更新配对文件。生产HTTPS一致性验收9项通过，临时账号清理后真实用户仍为2、完整性ok、外键违规0。追加版本标记修复后本地后台43项通过。
+
+后台最终源码a69244ebcada2ffd24628ea516436017923d4d93，[CI42075018098](https://github.com/clowndest-svg/JianZhiSuXingRuanJianHouTai/actions/runs/42075018098)的test/deploy全部成功。实际版本接口返回相同构建SHA、paired=true及schema17；视觉设置仍启用本机InternVL3-1B，密钥不回显，后台UID990。真实网页另5项验证历史修正、版本冲突和统计联动通过。
+
+原有饮食/体重/训练记录完整摘要与轻塑号在部署前后保持一致；监控正常。77表及23媒体的加密备份恢复验证通过。最终源码和证据见主应用[发布记录](https://github.com/clowndest-svg/JianZhiSuXingRuanJian/blob/main/docs/release-r191.md)。后续收尾文档提交不改变已验收运行源码。
