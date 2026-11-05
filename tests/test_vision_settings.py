@@ -36,5 +36,12 @@ class VisionSettings(unittest.TestCase):
  def test_actual_image_requires_consent_and_input_bound(self):
   self.assertEqual(self.post('',self.local()).status_code,200)
   for p in [{},{'consent':False,'image':'abc'},{'consent':True,'image':'x'*1500001},{'consent':True,'image':'not base64'}]:self.assertEqual(self.post('/test',p).status_code,400)
+ def test_check_state_defaults_to_the_dedicated_writable_config_directory(self):
+  import os
+  with patch.dict(os.environ):
+   os.environ.pop('QINGSU_VISION_CHECK',None)
+   m=fixture.load(fixture.BACKEND/'ops/admin_api.py','vision_directory_contract')
+  self.assertEqual(Path(m.VISION_CHECK).parent,Path(m.VISION_CONFIG).parent)
+  self.assertEqual(Path(m.VISION_CHECK).name,'check.json')
 
 if __name__=='__main__':unittest.main()
