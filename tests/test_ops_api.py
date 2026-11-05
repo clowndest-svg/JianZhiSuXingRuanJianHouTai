@@ -130,9 +130,13 @@ class OpsApi(unittest.TestCase):
             "OPS_BASIC_PASSWORD": "dev-basic-pw",
             "QINGSU_MAIL_CONFIG": str(root / 'mail.json'),
             "QINGSU_MAIL_CHECK": str(root / 'mail-check.json'),
+            "QINGSU_VISION_CONFIG": str(root / 'vision.json'),
+            "QINGSU_VISION_CHECK": str(root / 'vision-check.json'),
             "QINGSU_MONITOR_FILE": str(root / 'monitor.json'),
         })
         self.ops_mod = load(BACKEND / "ops" / "admin_api.py", "qingsu_ops_api")
+        assert Path(self.ops_mod.VISION_CONFIG).parent == root
+        assert Path(self.ops_mod.VISION_CHECK).parent == root
         self.ops = TestClient(self.ops_mod.app, headers={
             "Authorization": "Basic " + __import__("base64").b64encode(b"qingsu:dev-basic-pw").decode()})
         # L2 的 Basic 与 L3 的令牌是分开的两层：这台 TestClient 默认带 Basic，

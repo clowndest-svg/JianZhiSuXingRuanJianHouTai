@@ -48,6 +48,23 @@ jobs:
         env:
           QINGSU_APP_REPO: ${{ github.workspace }}/main-app
         run: python tests/test_ops_api.py
+      - name: Verify vision settings and secret boundaries
+        env:
+          QINGSU_APP_REPO: ${{ github.workspace }}/main-app
+        run: python tests/test_vision_settings.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install fixed browser runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/vision-ui" playwright@1.64.1
+          "$RUNNER_TEMP/vision-ui/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify vision settings in Chromium
+        env:
+          QINGSU_APP_REPO: ${{ github.workspace }}/main-app
+          QINGSU_TEST_PYTHON: python
+          NODE_PATH: ${{ runner.temp }}/vision-ui/node_modules
+        run: node tests/vision-ui.mjs
       - name: Verify cross-repository session, export and deletion boundaries
         env:
           QINGSU_APP_REPO: ${{ github.workspace }}/main-app

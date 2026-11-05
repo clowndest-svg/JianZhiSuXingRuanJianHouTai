@@ -51,6 +51,8 @@ CONTAINER_NAME = os.environ.get("QINGSU_CONSOLE_CONTAINER", "qingsu-console")
 PYTHON_BIN = os.environ.get("QINGSU_PYTHON_BIN", "python3")
 MAIL_CONFIG = os.environ.get('QINGSU_MAIL_CONFIG', '/opt/qingsu/mail.json')
 MAIL_CHECK = os.environ.get('QINGSU_MAIL_CHECK', '/opt/qingsu/admin/mail-check.json')
+VISION_CONFIG = os.environ.get('QINGSU_VISION_CONFIG', '/opt/qingsu/vision-config/vision.json')
+VISION_CHECK = os.environ.get('QINGSU_VISION_CHECK', '/opt/qingsu/admin/vision-check.json')
 MONITOR_FILE = os.environ.get('QINGSU_MONITOR_FILE', '/opt/qingsu/monitor/status.json')
 SESSION_TTL = 8 * 3600
 SESSION_IDLE_TTL = 2 * 3600
@@ -1978,6 +1980,134 @@ def _read_mail():
         return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _read_vision():
+    try:
+        raw = json.loads(Path(VISION_CONFIG).read_text(encoding='utf-8'))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _vision_safe(raw):
+    return {k: raw.get(k, '') for k in ('enabled', 'mode', 'base_url', 'model')} | {'api_key_set': bool(raw.get('api_key'))}
+
+
+def _vision_target(raw):
+    from urllib.parse import urlsplit
+    u = urlsplit(str(raw.get('base_url', '')))
+    if raw.get('mode') == 'local':
+        if raw.get('base_url') != 'http://127.0.0.1:8082/v1':
+            raise HTTPException(400, '本机模型地址固定为127.0.0.1:8082/v1')
+        return
+    if u.scheme != 'https' or not u.hostname or u.username or u.password or u.query or u.fragment or u.port not in (None,443):
+        raise HTTPException(400, '外部API请填写公开HTTPS地址（包含/v1，不含密钥和查询串）')
+    try:
+        addresses = socket.getaddrinfo(u.hostname, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        raise HTTPException(400, '外部API域名无法解析')
+    if not addresses or any(not ipaddress.ip_address(x[4][0]).is_global for x in addresses):
+        raise HTTPException(400, '外部API不能使用内网、回环或保留地址')
+
+
+@app.get('/api/vision')
+def vision_settings(actor: str = Depends(actor_of)):
+    raw = _read_vision()
+    check = None
+    try: check = json.loads(Path(VISION_CHECK).read_text(encoding='utf-8'))
+    except (OSError, ValueError): pass
+    return {'config': _vision_safe(raw), 'check': check,
+            'note': '配置存在和连接成功均不代表识图正确；请另做实际图片测试。照片仅内存处理，不写入饮食记录。'}
+
+
+@app.post('/api/vision')
+def vision_save(body: dict, actor: str = Depends(actor_of)):
+    before = _read_vision()
+    enabled = body.get('enabled')
+    mode = body.get('mode')
+    if not isinstance(enabled, bool) or mode not in ('local', 'external'):
+        raise HTTPException(400, '视觉服务启用状态或模式无效')
+    if not enabled and before:
+        after = dict(before, enabled=False)
+        _write_private(VISION_CONFIG, after, app_read=True)
+        Path(VISION_CHECK).unlink(missing_ok=True)
+        audit(actor,'vision_config','config','vision',after={'enabled':False})
+        return {'code':0,'config':_vision_safe(after),'note':'照片识别已停用，原有配置保留'}
+    after = {'enabled': enabled, 'mode': mode, 'base_url': str(body.get('base_url','')).strip().rstrip('/'),
+             'model': str(body.get('model','')).strip(), 'api_key': ''}
+    if not 1 <= len(after['model']) <= 120 or any(ord(x)<32 for x in after['model']):
+        raise HTTPException(400, '请填写1到120字的模型名称')
+    if len(after['base_url'])>300:raise HTTPException(400, 'API地址过长')
+    _vision_target(after)
+    if mode == 'external':
+        key = body.get('api_key','')
+        if not isinstance(key,str) or len(key)>1024 or any(ord(x)<32 for x in key):raise HTTPException(400,'API密钥格式无效')
+        if not key and all(after[k]==before.get(k) for k in ('mode','base_url','model')):key=before.get('api_key','')
+        if not key:raise HTTPException(400, '外部API需要密钥；更换地址或模型时请重新填写')
+        after['api_key'] = key
+    _write_private(VISION_CONFIG, after, app_read=True)
+    Path(VISION_CHECK).unlink(missing_ok=True)
+    audit(actor, 'vision_config', 'config', 'vision', before={'enabled': bool(before.get('enabled'))},
+          after={'enabled': enabled, 'mode': mode, 'model': after['model']})
+    return {'code': 0, 'config': _vision_safe(after), 'note': '视觉设置已保存，下一次识别即生效'}
+
+
+_vision_check_at = 0.0
+
+
+@app.post('/api/vision/check')
+def vision_connection(actor: str = Depends(actor_of)):
+    raw = _read_vision()
+    if not raw.get('enabled'):raise HTTPException(400, '请先保存并启用视觉服务')
+    _vision_target(raw)
+    try:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self,*args,**kwargs): return None
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+        request=urllib.request.Request(raw['base_url']+'/models',headers=({'Authorization':'Bearer '+raw['api_key']} if raw['mode']=='external' else {}))
+        with opener.open(request,timeout=10) as response:payload=response.read(65537)
+        if len(payload)>65536:raise ValueError()
+        models=json.loads(payload).get('data',[])
+        matched=next((x for x in models if x.get('id')==raw['model']),None)
+        result={'ok':bool(matched),'kind':'connection','checked_at':now_iso(),'message':'连接成功，找到所配置模型；尚未证明识图效果' if matched else '连接成功，但模型列表中未找到所配置名称'}
+    except Exception as error:
+        result={'ok':False,'kind':'connection','checked_at':now_iso(),'message':'连接检查失败（'+type(error).__name__+'），请核对地址、密钥和服务'}
+    _write_private(VISION_CHECK,result)
+    audit(actor,'vision_check','config','vision',after={'ok':result['ok']})
+    return result
+
+
+@app.post('/api/vision/test')
+def vision_image_test(body: dict, actor: str = Depends(actor_of)):
+    global _vision_check_at
+    if time.monotonic()-_vision_check_at<5:raise HTTPException(429,'请稍后再测')
+    raw=_read_vision()
+    if not raw.get('enabled'):raise HTTPException(400,'请先保存并启用视觉服务')
+    _vision_target(raw)
+    encoded=body.get('image','')
+    if body.get('consent') is not True or not isinstance(encoded,str) or len(encoded)>1500000:
+        raise HTTPException(400,'请确认处理说明并选择1MB以内测试图片')
+    try:blob=base64.b64decode(encoded,validate=True)
+    except Exception:raise HTTPException(400,'测试图片编码无效')
+    root=os.environ.get('QINGSU_APP_ROOT','/opt/qingsu')
+    if root not in sys.path:sys.path.insert(0,root)
+    try:from app_modules import meal_photo
+    except ImportError:raise HTTPException(503,'请先发布支持照片识餐的主应用')
+    _vision_check_at=time.monotonic()
+    old=meal_photo.CONFIG
+    # Same explicit path is used by the main service; no credentials cross HTTP.
+    if old != VISION_CONFIG:raise HTTPException(503,'后台与主应用视觉配置路径不一致')
+    began=time.monotonic()
+    try:
+        result=meal_photo.recognize(meal_photo.prepare_image(blob,448 if raw['mode']=='local' else 1280))
+        check={'ok':True,'kind':'image','checked_at':now_iso(),'elapsed_ms':round((time.monotonic()-began)*1000),'message':'实际图片已返回有效食材结构，请人工核对识别内容；未保存照片或饮食'}
+    except HTTPException as error:
+        check={'ok':False,'kind':'image','checked_at':now_iso(),'message':str(error.detail)}
+        _write_private(VISION_CHECK,check);audit(actor,'vision_test','config','vision',after={'ok':False});raise
+    _write_private(VISION_CHECK,check)
+    audit(actor,'vision_test','config','vision',after={'ok':True,'elapsed_ms':check['elapsed_ms']})
+    return {'code':0,'check':check,'result':result}
 
 
 def _mail_safe(raw):

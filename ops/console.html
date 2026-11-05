@@ -101,6 +101,22 @@
 </header>
 
 <main>
+  <section id="vision-settings" hidden>
+    <h2>照片识餐 · 视觉模型设置</h2>
+    <p class="note">本机开源模型不向外部服务传照片。选择外部API后，用户主动确认的照片会发到对应服务；请核对服务的隐私和使用规则。保存后下一次识别生效，文字AI配置保持独立。</p>
+    <form id="vision-form">
+      <div class="row"><label><input id="vision-enabled" type="checkbox">启用照片识别</label><label>服务模式 <select id="vision-mode"><option value="local">本机开源视觉模型</option><option value="external">外部视觉 API</option></select></label></div>
+      <div class="row"><label for="vision-base">API Base URL（含 /v1）</label><input id="vision-base" type="text" maxlength="300" style="flex:1" placeholder="http://127.0.0.1:8082/v1" required></div>
+      <div class="row"><label for="vision-model">视觉模型名称</label><input id="vision-model" type="text" maxlength="120" required></div>
+      <div class="row"><label for="vision-key">API Key</label><input id="vision-key" type="password" maxlength="1024" autocomplete="new-password" placeholder="本机模型不需要；外部密钥不回显"></div>
+      <div class="row"><button class="primary" type="submit">保存视觉设置</button><button type="button" id="vision-local">填入本机默认值</button><button type="button" id="vision-check">检查连接与模型</button><button type="button" id="vision-refresh">刷新状态</button></div>
+    </form>
+    <p id="vision-result" role="status">尚未读取设置</p>
+    <h3>实际图片测试</h3><p class="note">连接成功不等于能看图。选择1MB以内JPEG/PNG/WebP餐食照片；测试不写饮食流水，不保存照片。结果仍需人工核对。</p>
+    <div class="row"><input id="vision-image" type="file" accept="image/jpeg,image/png,image/webp"><label><input id="vision-consent" type="checkbox">同意按当前视觉配置处理测试照片</label><button id="vision-test" type="button">运行实际识图</button></div>
+    <pre id="vision-output" aria-live="polite"></pre>
+  </section>
+
   <section id="login">
     <h2>进入运维台</h2>
     <div class="row">
@@ -115,6 +131,7 @@
   <nav id="nav" hidden>
     <button data-go="overview">概览</button>
     <button data-go="site-status">域名与发布</button>
+    <button data-go="vision-settings">视觉模型</button>
     <button data-go="mail-settings">邮件接入</button>
     <button data-go="feedback-workspace">反馈工单</button>
     <button data-go="reports-workspace">举报审核</button>
@@ -375,6 +392,7 @@ function signedOut(){
   document.querySelectorAll('main > section').forEach(s=>{s.hidden=s.id!=='login';});
   $("nav").hidden=true;$("logout").hidden=true;$("hint").hidden=true;
   $("who").textContent='未登录';$("token").value='';$("mail-password").value='';
+  $('vision-key').value='';$('vision-image').value='';$('vision-output').textContent='';
 }
 $("logout").onclick = async () => {
   try { await api("/logout", { method: "POST", body: "{}" }); } catch (e) {}
@@ -383,11 +401,12 @@ $("logout").onclick = async () => {
 
 /* ---------- 分页 ---------- */
 function show(name) {
-  ["overview", "site-status", "mail-settings", "feedback-workspace", "reports-workspace", "users", "gate", "sessions", "pairing", "backup", "audit"]
+  ["overview", "site-status", "vision-settings", "mail-settings", "feedback-workspace", "reports-workspace", "users", "gate", "sessions", "pairing", "backup", "audit"]
     .forEach((s) => { $(s).hidden = s !== name; });
   document.querySelectorAll("#nav [data-go]").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
   if (name === "overview") refreshAll();
   if (name === "site-status") refreshSite();
+  if (name === "vision-settings") refreshVision();
   if (name === "mail-settings") refreshMail();
   if (name === "feedback-workspace") loadFeedback();
   if (name === "reports-workspace") loadReports();
@@ -941,6 +960,20 @@ $("mail-check").onclick=async()=>{
 };
 
 /* ---------- 起点 ---------- */
+async function refreshVision(){
+ try{const d=await api('/vision'),c=d.config||{};$('vision-enabled').checked=!!c.enabled;$('vision-mode').value=c.mode||'local';$('vision-base').value=c.base_url||'http://127.0.0.1:8082/v1';$('vision-model').value=c.model||'internvl3-1b';$('vision-key').value='';$('vision-key').placeholder=c.api_key_set?'已保存；地址和模型不变时留空保留':'尚未设置；本机模型不需要';$('vision-result').textContent=d.check?d.check.checked_at+' · '+d.check.message:'配置已读取，尚未完成实际图片测试';}
+ catch(e){$('vision-result').textContent='读取失败：'+e.message;}
+}
+$('vision-refresh').onclick=refreshVision;
+$('vision-local').onclick=()=>{$('vision-mode').value='local';$('vision-base').value='http://127.0.0.1:8082/v1';$('vision-model').value='internvl3-1b';$('vision-key').value='';};
+$('vision-form').onsubmit=async ev=>{ev.preventDefault();const b=ev.submitter;b.disabled=true;try{const d=await api('/vision',{method:'POST',body:JSON.stringify({enabled:$('vision-enabled').checked,mode:$('vision-mode').value,base_url:$('vision-base').value.trim(),model:$('vision-model').value.trim(),api_key:$('vision-key').value})});$('vision-key').value='';await refreshVision();toast(d.note);}catch(e){$('vision-result').textContent='未保存：'+e.message;}finally{b.disabled=false;}};
+$('vision-check').onclick=async()=>{const b=$('vision-check');b.disabled=true;$('vision-result').textContent='检查连接与模型列表中…';try{const d=await api('/vision/check',{method:'POST',body:'{}'});$('vision-result').textContent=d.checked_at+' · '+d.message;}catch(e){$('vision-result').textContent='未完成：'+e.message;}finally{b.disabled=false;}};
+$('vision-test').onclick=async()=>{
+ const file=$('vision-image').files[0],b=$('vision-test');if(!file||file.size>1024*1024||!['image/jpeg','image/png','image/webp'].includes(file.type)||!$('vision-consent').checked){toast('请选择1MB以内图片并勾选处理说明');return;}
+ b.disabled=true;$('vision-output').textContent='正在进行真实图片推理，通常需要数十秒…';
+ try{const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(new Error('图片读取失败'));r.readAsDataURL(file);});const d=await api('/vision/test',{method:'POST',body:JSON.stringify({image:data,consent:true})});$('vision-output').textContent=JSON.stringify(d.result,null,2);await refreshVision();}
+ catch(e){$('vision-output').textContent='识图未完成：'+e.message;}finally{b.disabled=false;}
+};
 whoami();
 </script>
 </body>
