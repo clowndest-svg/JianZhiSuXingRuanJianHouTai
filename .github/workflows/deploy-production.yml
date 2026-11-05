@@ -97,6 +97,16 @@ jobs:
           python - <<'PY'
           import os
           import tarfile
+          from pathlib import Path
+          revision = os.environ['GITHUB_SHA']
+          assert len(revision) == 40 and all(c in '0123456789abcdef' for c in revision)
+          source = Path('ops/admin_api.py')
+          text = source.read_text(encoding='utf-8')
+          marker = '__QINGSU_ADMIN_BUILD_REVISION__'
+          assert text.count(marker) == 1
+          text = text.replace(marker, revision)
+          compile(text, str(source), 'exec')
+          source.write_text(text, encoding='utf-8')
           with tarfile.open(os.path.join(os.environ["RUNNER_TEMP"], "qingsu-admin.tar"), "w") as archive:
               archive.add("ops/admin_api.py", arcname="ops/admin_api.py")
               archive.add("ops/console.html", arcname="ops/console.html")

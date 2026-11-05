@@ -591,6 +591,15 @@ APP_REQUIRED_COLUMNS = {
     "workout_logs": ("occurred_at",),
 }
 ADMIN_REVISION = os.environ.get("QINGSU_ADMIN_REVISION", "unknown")
+BUILD_REVISION = '__QINGSU_ADMIN_BUILD_REVISION__'
+
+
+def deployment_revision() -> str:
+    # CI stamps this immutable value into the two-file deployment archive.
+    # A systemd environment value can outlive many subsequent releases.
+    if len(BUILD_REVISION) == 40 and all(c in '0123456789abcdef' for c in BUILD_REVISION):
+        return BUILD_REVISION
+    return ADMIN_REVISION
 
 
 def missing_app_columns() -> list[str]:
@@ -619,7 +628,7 @@ def version_pairing() -> dict:
     """把"主应用是哪版、后台是哪版、结构对不对得上"摊在一处（方案 C03/C04 要的配对记录）。"""
     ready, err = json_get(APP_API + "/health/ready")
     missing = missing_app_columns()
-    return {"admin_revision": ADMIN_REVISION,
+    return {"admin_revision": deployment_revision(),
             "app_release": (ready or {}).get("release"),
             "app_schema_version": (ready or {}).get("schema_version"),
             "app_schema_required": (ready or {}).get("schema_required"),

@@ -513,6 +513,9 @@ class OpsApi(unittest.TestCase):
     # ---- 注销 ----
     def test_delete_account_requires_exact_row_count(self):
         self.app.post("/api/weight/log", headers=self.auth(), json={"weight_jin": 150})
+        food = {"food_name":"receipt fixture", "slot":"午餐", "cal":123, "request_id":"same-key-separate-users"}
+        self.assertEqual(self.app.post('/api/food/log', headers=self.auth(), json=food).status_code, 200)
+        self.assertEqual(self.app.post('/api/food/log', headers={"Authorization":"Bearer "+self.other['token']}, json=food).status_code, 200)
         # 先给另一个账号留一条记录，删号之后必须原封不动
         self.app.post("/api/weight/log",
                       headers={"Authorization": "Bearer " + self.other["token"]},
@@ -523,6 +526,7 @@ class OpsApi(unittest.TestCase):
                              json={"expect_username": "opsowner", "plan_only": True},
                              headers=self.bearer).json()
         self.assertGreater(plan["rows"], 0)
+        self.assertTrue(any(item['table']=='record_write_receipts' and item['rows']==1 for item in plan['plan']))
         for item in plan["plan"]:
             real = self.sql("SELECT COUNT(*) c FROM %s WHERE %s=?" % (item["table"], item["column"]),
                             (self.signup["id"],))[0]["c"]
@@ -538,12 +542,23 @@ class OpsApi(unittest.TestCase):
         self.assertEqual(good.status_code, 200, good.text)
         self.assertEqual(self.sql("SELECT id FROM users WHERE id=?", (self.signup["id"],)), [])
         self.assertEqual(self.sql("PRAGMA foreign_key_check"), [], "删完留了孤儿行")
+        self.assertEqual(self.sql('SELECT user_id FROM record_write_receipts WHERE user_id=?', (self.signup['id'],)), [])
+        self.assertEqual(self.sql('SELECT COUNT(*) c FROM record_write_receipts WHERE user_id=?', (self.other['id'],))[0]['c'], 1)
         self.assertEqual(self.sql("SELECT COUNT(*) c FROM users")[0]["c"], 1, "别人的账号被牵连了")
         self.assertEqual(self.sql("SELECT COUNT(*) c FROM weight_logs WHERE user_id=?",
                                   (self.other["id"],))[0]["c"], other_before,
                          "别人的记录被一起删掉了")
         self.assertEqual(self.sql("SELECT COUNT(*) c FROM weight_logs")[0]["c"], other_before,
                          "整张表被清空式的删除")
+
+    def test_pairing_reports_built_revision_before_stale_environment(self):
+        self.ops_mod.ADMIN_REVISION = 'b' * 40
+        self.ops_mod.BUILD_REVISION = 'a' * 40
+        result = self.ops.get('/api/version-pairing', headers=self.bearer)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()['admin_revision'], 'a' * 40)
+        self.ops_mod.BUILD_REVISION = 'unstamped development build'
+        self.assertEqual(self.ops_mod.deployment_revision(), 'b' * 40)
 
     def test_delete_account_survives_other_peoples_interactions_on_its_posts(self):
         """别人点赞/评论/收藏了要删的账号的帖子时，只按 user_id 删会撞外键整笔回滚。
